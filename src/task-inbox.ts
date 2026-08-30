@@ -55,15 +55,6 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 	}
 }
 
-export function restoredInboxCursor(entries: readonly unknown[]): string {
-	let cursor = "0";
-	for (const entry of entries) {
-		if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== TASK_CURSOR_CUSTOM_TYPE || !isRecord(entry.data) || !decimal(entry.data.cursor)) continue;
-		cursor = entry.data.cursor;
-	}
-	return cursor;
-}
-
 function inboxEvent(delivery: RelayDelivery): TaskEvent {
 	try {
 		const payload = JSON.parse(delivery.envelope.payload) as unknown;
@@ -112,8 +103,4 @@ function key(taskId: string, eventId: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function decimal(value: unknown): value is string {
-	return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value);
 }
