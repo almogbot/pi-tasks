@@ -31,6 +31,19 @@ For a multi-step project phase, retain one persistent implementer and one persis
 
 After every verified and acknowledged terminal task, explicitly retain a parent-spawned session only when concrete follow-up is likely; otherwise close it through canonical Wolfpack session control. Workers never close their own sessions. terminal `send` is only for explicit human steering; it is not task state, completion evidence, or a substitute for `agent_task_message`.
 
+## delegation lifecycle
+
+| event | owner | command | session outcome |
+| --- | --- | --- | --- |
+| assignment completion | worker | `agent_task_done` | unchanged |
+| task acknowledgment | parent | `agent_task_ack` | unchanged |
+| role session retention | parent | `none` | retained for reuse |
+| role session teardown | parent | `wolfpack kill <session-or-id> --json` | exact stable session id terminated |
+| teardown verification | parent | `wolfpack list --json` | exact stable session id absent |
+| Pi exit | none | `/quit` | not Wolfpack teardown |
+
+Assignment completion ends the assigned task, not the reusable role session. When no further reuse is likely, the parent—not the worker—must pass the exact stable session ID to `wolfpack kill <session-or-id> --json`, then inspect `wolfpack list --json` and verify that ID is absent. `/quit` exits Pi; it is not Wolfpack teardown. Workers never close themselves.
+
 ## v2 workflow
 
 1. create or select the role session, verify its structured project and terminal readiness, then obtain its registered `taskEndpoint`.
