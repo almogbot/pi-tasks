@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
+import { abortableSleep } from "./abortable-sleep";
 import {
 	DEFAULT_TASK_TIMEOUT_MS,
 	GatewayClientError,
@@ -126,7 +127,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, client: WolfpackGateway
 					if (terminal(status.status)) return statusResult(status);
 					if (Date.now() >= deadline) return toolResult({ taskId: params.taskId, status: status.status, error: { code: "WAIT_TIMEOUT", retryable: true } }, `## task wait\n- task: \`${params.taskId}\`\n- status: ${status.status}\n- wait timed out`);
 					onUpdate?.({ content: [{ type: "text", text: `waiting for ${params.taskId}...` }], details: {} });
-					await sleep(Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())), signal);
+					await abortableSleep(Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())), signal, () => new GatewayClientError("ABORTED", "task wait was cancelled", true));
 				}
 			} catch (error) { return clientError(error); }
 		}, renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
@@ -237,12 +238,4 @@ function text(result: { readonly content?: readonly unknown[] }): string {
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
 	if (signal?.aborted) throw new GatewayClientError("ABORTED", "task wait was cancelled", true);
-}
-
-async function sleep(milliseconds: number, signal: AbortSignal | undefined): Promise<void> {
-	await new Promise<void>((resolve, reject) => {
-		const timeout = setTimeout(resolve, milliseconds);
-		const abort = (): void => { clearTimeout(timeout); reject(new GatewayClientError("ABORTED", "task wait was cancelled", true)); };
-		signal?.addEventListener("abort", abort, { once: true });
-	});
 }

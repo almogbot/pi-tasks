@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
+import { abortableSleep } from "./abortable-sleep";
 import { deliverTaskInbox, incorporatedTaskEvents } from "./task-inbox";
 import { TaskOutboxDeliveryError, TaskProtocolError } from "./task-protocol";
 import { createWolfpackTaskCore } from "./wolfpack-task-relay";
@@ -205,7 +206,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 					if (terminal(task.status)) return toolResult(task, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}`);
 					if (Date.now() >= deadline) return toolResult({ taskId: params.taskId, status: task.status }, `## task wait\n- task: \`${params.taskId}\`\n- status: ${task.status}\n- wait timed out`);
 					onUpdate?.({ content: [{ type: "text", text: `waiting for ${params.taskId}...` }], details: {} });
-					await sleep(Math.min(WAIT_POLL_MS, deadline - Date.now()), signal);
+					await abortableSleep(Math.max(1, Math.min(WAIT_POLL_MS, deadline - Date.now())), signal, () => new Error("task wait was cancelled"));
 				}
 			} catch (error) { return taskError(error); }
 		}, renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
@@ -310,12 +311,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function text(result: { readonly content?: readonly unknown[] }): string {
 	const first = result.content?.[0];
 	return first && typeof first === "object" && "type" in first && first.type === "text" && "text" in first && typeof first.text === "string" ? first.text : "";
-}
-
-async function sleep(milliseconds: number, signal: AbortSignal | undefined): Promise<void> {
-	if (signal?.aborted) throw new Error("task wait was cancelled");
-	await new Promise<void>((resolve, reject) => {
-		const timer = setTimeout(resolve, Math.max(1, milliseconds));
-		signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("task wait was cancelled")); }, { once: true });
-	});
 }
