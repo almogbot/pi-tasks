@@ -18,7 +18,9 @@ const TARGET_NOT_REGISTERED_CODE = "TARGET_NOT_REGISTERED";
 const WAIT_POLL_MS = 250;
 const SUMMARY_MAX_CHARS = 1_200;
 const PRE_ASSIGNMENT_TOOLS = new Set(["agent_task_inbox", "agent_task_status", "agent_task_wait"]);
+const COORDINATOR_ONLY_TASK_TOOLS = new Set(["agent_task_send", "agent_task_cancel", "agent_task_ack"]);
 export const WORKER_GATE_DENIAL_CODE = "PI_TASK_WORKER_ASSIGNMENT_REQUIRED";
+export const WORKER_COORDINATION_FORBIDDEN_CODE = "PI_TASK_WORKER_COORDINATION_FORBIDDEN";
 
 const EndpointParams = Type.Object({
 	relay: Type.String({ minLength: 1, description: "relay identifier" }),
@@ -130,17 +132,22 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 
 	pi.on("tool_call", async (event, context) => {
 		if (!workerGateEnabled || PRE_ASSIGNMENT_TOOLS.has(event.toolName)) return undefined;
+		if (COORDINATOR_ONLY_TASK_TOOLS.has(event.toolName)) return { block: true, reason: WORKER_COORDINATION_FORBIDDEN_CODE };
 		try {
 			const activeCore = await configuredCore(context.signal);
 			const assignments = assignedWorkerTasks(activeCore, context.sessionManager.getEntries());
+			const taskId = inputTaskId(event.input);
 			if (event.toolName === "agent_task_done") {
-				const taskId = isRecord(event.input) && typeof event.input.taskId === "string" ? event.input.taskId : undefined;
 				const assigned = taskId === undefined ? undefined : assignments.find((task) => task.taskId === taskId);
 				if (assigned === undefined || (!eligibleWorkerTask(assigned, closingTaskIds) && assigned.terminalDelivery.state === "not_submitted" && !closingTaskIds.has(assigned.taskId))) {
 					return { block: true, reason: WORKER_GATE_DENIAL_CODE };
 				}
 				closingTaskIds.add(assigned.taskId);
 				return undefined;
+			}
+			if (event.toolName === "agent_task_message") {
+				const assigned = taskId === undefined ? undefined : assignments.find((task) => task.taskId === taskId);
+				return assigned !== undefined && eligibleWorkerTask(assigned, closingTaskIds) ? undefined : { block: true, reason: WORKER_GATE_DENIAL_CODE };
 			}
 			if (assignments.some((task) => eligibleWorkerTask(task, closingTaskIds))) return undefined;
 		} catch {
@@ -229,7 +236,17 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 	pi.registerTool({
 		name: "agent_task_cancel", label: "Cancel Agent Task", description: "Persist cancellation before relay submission.", parameters: TaskIdParams,
-		async execute(_id, params, signal) { try { await (await configuredCore(signal)).submitIntent({ taskId: params.taskId, type: "task.cancelled", payload: {} }, signal); return toolResult({ taskId: params.taskId }, `## task cancellation requested\n- task: \`${params.taskId}\``); } catch (error) { return taskError(error); } },
+		async execute(_id, params, signal) {
+			try {
+				const activeCore = await configuredCore(signal);
+				try {
+					await activeCore.submitIntent({ taskId: params.taskId, type: "task.cancelled", payload: {} }, signal);
+					return toolResult({ taskId: params.taskId }, `## task cancellation requested\n- task: \`${params.taskId}\``);
+				} catch (error) {
+					return blockedCancellationResult(activeCore, params.taskId, error) ?? taskError(error);
+				}
+			} catch (error) { return taskError(error); }
+		},
 		renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
 	pi.registerTool({
@@ -276,6 +293,29 @@ function taskError(error: unknown): AgentToolResult<unknown> {
 	return toolResult({ error: { code: "TASK_ERROR", message, retryable: true } }, `## task error\n- ${message}`);
 }
 
+function blockedCancellationResult(core: TaskCore, taskId: string, error: unknown): AgentToolResult<unknown> | undefined {
+	if (!(error instanceof TaskOutboxDeliveryError) || error.code !== TARGET_NOT_REGISTERED_CODE || error.retryable || error.details?.taskId !== taskId) return undefined;
+	const task = core.getTask(taskId);
+	if (task?.status !== "cancelled" || !sameEndpoint(task.origin, core.endpoint)) return undefined;
+	const details = { ...error.details };
+	delete details.taskId;
+	delete details.envelopeId;
+	delete details.target;
+	delete details.blockedAt;
+	return toolResult({
+		taskId,
+		status: "cancelled",
+		warnings: [{
+			code: error.code,
+			message: error.message,
+			retryable: false,
+			delivery: "blocked",
+			target: task.target,
+			details,
+		}],
+	}, `## task cancelled\n- task: \`${taskId}\`\n- canonical status: cancelled\n- target delivery: blocked; receiver incorporation not confirmed`);
+}
+
 function outboxFailureStatus(error: unknown): "tasks: relay unavailable" | "tasks: outbox degraded" {
 	return error instanceof TaskOutboxDeliveryError && error.code === TARGET_NOT_REGISTERED_CODE ? "tasks: outbox degraded" : "tasks: relay unavailable";
 }
@@ -302,6 +342,10 @@ function eligibleWorkerTask(task: TaskSnapshot, closingTaskIds: ReadonlySet<stri
 
 function sameEndpoint(left: TaskEndpoint, right: TaskEndpoint): boolean {
 	return left.relay === right.relay && left.id === right.id;
+}
+
+function inputTaskId(input: unknown): string | undefined {
+	return isRecord(input) && typeof input.taskId === "string" ? input.taskId : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

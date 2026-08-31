@@ -308,6 +308,57 @@ test("preserves blocked receiver terminal identity across restart", async () => 
 	restartedStore.close();
 });
 
+test("reserves one origin cancellation across sequential, concurrent, and restart retries", async () => {
+	const directory = mkdtempSync("/tmp/pi-tasks-core-");
+	temporaryDirectories.push(directory);
+	const path = join(directory, "tasks.sqlite");
+	const state = { blockedTargetId: undefined as string | undefined, sent: [] as string[], receiveCalls: 0 };
+	const relay = selectiveRelay(state);
+	const store = createTaskStore({ path });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store, ids: sequence("origin") });
+	await origin.connect();
+	const created = await origin.createTask({ target: RECEIVER, task: "cancel after receiver disappears", timeoutMs: 1_000 });
+	state.blockedTargetId = RECEIVER.id;
+
+	const blockedOutcome = {
+		code: "TARGET_NOT_REGISTERED",
+		retryable: false,
+		details: {
+			taskId: created.taskId,
+			envelopeId: expect.any(String),
+			target: RECEIVER,
+			blockedAt: expect.any(Number),
+			targetId: RECEIVER.id,
+		},
+	};
+	await expect(origin.submitIntent({ taskId: created.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject(blockedOutcome);
+	const cancellationEventId = origin.getTask(created.taskId)?.events.find((event) => event.type === "task.cancelled")?.eventId;
+	if (cancellationEventId === undefined) throw new Error("expected canonical cancellation before delivery failure");
+	const durableEnvelopeIds = [...store.outbox("accepted"), ...store.quarantinedOutbox()].map((record) => record.envelope.envelopeId).sort();
+
+	await expect(origin.submitIntent({ taskId: created.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject(blockedOutcome);
+	const concurrentRetries = await Promise.allSettled([
+		origin.submitIntent({ taskId: created.taskId, type: "task.cancelled", payload: {} }),
+		origin.submitIntent({ taskId: created.taskId, type: "task.cancelled", payload: {} }),
+	]);
+	for (const retry of concurrentRetries) {
+		expect(retry.status).toBe("rejected");
+		if (retry.status === "rejected") expect(retry.reason).toMatchObject(blockedOutcome);
+	}
+	store.close();
+
+	const restartedStore = createTaskStore({ path });
+	const restarted = createTaskCore({ endpoint: ORIGIN, relay, store: restartedStore, ids: sequence("restart") });
+	await expect(restarted.submitIntent({ taskId: created.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject(blockedOutcome);
+
+	expect(restarted.getTask(created.taskId)?.events.map((event) => [event.type, event.eventId])).toEqual([
+		["task.created", "origin-2"],
+		["task.cancelled", cancellationEventId],
+	]);
+	expect([...restartedStore.outbox("accepted"), ...restartedStore.quarantinedOutbox()].map((record) => record.envelope.envelopeId).sort()).toEqual(durableEnvelopeIds);
+	restartedStore.close();
+});
+
 test("evaluates every expired task when one timeout envelope is undeliverable", async () => {
 	const state = { blockedTargetId: undefined as string | undefined, sent: [] as string[], receiveCalls: 0 };
 	const relay = selectiveRelay(state);

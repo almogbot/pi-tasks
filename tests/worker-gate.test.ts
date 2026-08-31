@@ -28,6 +28,7 @@ type ToolCallHandler = (event: { readonly toolName: string; readonly toolCallId:
 const ORIGIN = { relay: "memory", id: "origin" } as const;
 const WORKER = { relay: "memory", id: "worker" } as const;
 const DENIAL_CODE = WORKER_GATE_DENIAL_CODE;
+const COORDINATION_DENIAL_CODE = "PI_TASK_WORKER_COORDINATION_FORBIDDEN";
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
@@ -51,6 +52,32 @@ test("activated workers fail closed before assignment while exact opt-out sessio
 	expect(await call(inactiveGate, "bash", { command: "pwd" }, [])).toBeUndefined();
 	const ordinaryGate = registerGate(worker, undefined);
 	expect(await call(ordinaryGate, "bash", { command: "pwd" }, [])).toBeUndefined();
+});
+
+test("assigned workers cannot call coordinator-only task tools", async () => {
+	const fixture = await assignedFixture(1);
+	const taskId = requiredTaskId(fixture.taskIds, 0);
+	const assignment = assignmentEntry(fixture.worker, taskId);
+	const gate = registerGate(fixture.worker, "1");
+
+	for (const [toolName, input] of [
+		["agent_task_send", { to: WORKER, task: "delegate recursively" }],
+		["agent_task_cancel", { taskId }],
+		["agent_task_ack", { taskId }],
+	] as const) {
+		expect(await call(gate, toolName, input, [assignment])).toEqual({ block: true, reason: COORDINATION_DENIAL_CODE });
+	}
+});
+
+test("worker task messages require an eligible incorporated assignment matching the input task id", async () => {
+	const fixture = await assignedFixture(2);
+	const firstTaskId = requiredTaskId(fixture.taskIds, 0);
+	const secondTaskId = requiredTaskId(fixture.taskIds, 1);
+	const firstAssignment = assignmentEntry(fixture.worker, firstTaskId);
+	const gate = registerGate(fixture.worker, "1");
+
+	expect(await call(gate, "agent_task_message", { taskId: firstTaskId, type: "information", message: "update" }, [firstAssignment])).toBeUndefined();
+	expect(await call(gate, "agent_task_message", { taskId: secondTaskId, type: "information", message: "wrong task" }, [firstAssignment])).toEqual({ block: true, reason: DENIAL_CODE });
 });
 
 test("only structured assignment evidence matching a local active worker task opens the gate", async () => {

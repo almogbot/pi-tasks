@@ -126,6 +126,18 @@ describe("gateway package documentation", () => {
 		]) expect(skill).toContain(detail);
 	});
 
+	test("documents task workers as leaf roles rather than nested coordinators", async () => {
+		const [readme, skill] = await Promise.all([readFile(readmePath, "utf8"), readFile(delegationSkillPath, "utf8")]);
+		for (const document of [readme, skill]) {
+			const normalized = document.toLowerCase();
+			expect(document).toContain("`PI_TASK_WORKER=1` sessions are leaf roles");
+			expect(normalized).toContain("generic role-orchestration guidance applies only to non-worker coordinators");
+			expect(document).toContain("PI_TASK_WORKER_COORDINATION_FORBIDDEN");
+			for (const tool of ["agent_task_send", "agent_task_cancel", "agent_task_ack"]) expect(normalized).toContain(`workers cannot call \`${tool}\``);
+		}
+		expect(skill).toContain("must not create, rotate, or close Wolfpack sessions through shell or session-control tools");
+	});
+
 	test("ships a recovery-only context summary workflow", async () => {
 		const skill = await readFile(summarySkillPath, "utf8");
 		expect(skill).toContain("parent authors normal summaries");

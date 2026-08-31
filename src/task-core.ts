@@ -1,5 +1,6 @@
 import {
 	MAX_RELAY_PAYLOAD_BYTES,
+	ORIGIN_CANCELLATION_OPERATION,
 	PARENT_ACKNOWLEDGMENT_OPERATION,
 	TASK_PROTOCOL_VERSION,
 	TERMINAL_INTENT_OPERATION,
@@ -141,12 +142,20 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 			if (!RECEIVER_INTENT_TYPES.has(input.type) || !isRecord(input.payload)) throw new TaskProtocolError("INVALID_INTENT", "intent type or payload is invalid");
 			let persistedEnvelopeIds: readonly string[] = [];
 			let receiverTerminal = false;
+			let originCancellation = false;
 			options.store.transaction(() => {
 				const task = requiredTask(options.store, input.taskId);
 				receiverTerminal = !sameEndpoint(options.endpoint, task.origin) && TERMINAL_EVENTS.has(input.type);
+				originCancellation = sameEndpoint(options.endpoint, task.origin) && input.type === "task.cancelled";
 				persistedEnvelopeIds = persistIntent(options, clock.now, ids, task, input);
 			});
-			await flush(options, signal, new Set(persistedEnvelopeIds));
+			try {
+				await flush(options, signal, new Set(persistedEnvelopeIds));
+			} catch (error) {
+				if (originCancellation) throwIfCancellationDeliveryBlocked(options, input.taskId, persistedEnvelopeIds);
+				throw error;
+			}
+			if (originCancellation) throwIfCancellationDeliveryBlocked(options, input.taskId, persistedEnvelopeIds);
 			if (receiverTerminal) throwIfTerminalDeliveryBlocked(options.store, input.taskId);
 		},
 		async recordInsertion(input, signal) {
@@ -242,7 +251,8 @@ function persistReceivedEnvelope(options: TaskCoreOptions, now: () => number, id
 
 function persistIntent(options: TaskCoreOptions, now: () => number, ids: () => string, task: TaskRecord, input: SubmitIntentInput): readonly string[] {
 	if (sameEndpoint(options.endpoint, task.origin)) {
-		return canonicalize(options, now, ids, task, { intentId: ids(), taskId: input.taskId, type: input.type, payload: input.payload }, input.type);
+		const operation = input.type === "task.cancelled" ? ORIGIN_CANCELLATION_OPERATION : undefined;
+		return canonicalize(options, now, ids, task, { intentId: ids(), taskId: input.taskId, type: input.type, payload: input.payload }, input.type, operation);
 	}
 	const envelopeId = ids();
 	const intent: TaskIntent = { intentId: ids(), taskId: input.taskId, type: input.type, payload: input.payload };
@@ -337,6 +347,16 @@ function envelope(envelopeId: string, source: TaskEndpoint, target: TaskEndpoint
 
 function parsePayload(envelope: RelayEnvelope): unknown {
 	try { return JSON.parse(envelope.payload) as unknown; } catch { throw new TaskProtocolError("INVALID_PAYLOAD", "relay envelope payload is not valid task protocol JSON"); }
+}
+
+function throwIfCancellationDeliveryBlocked(options: TaskCoreOptions, taskId: string, envelopeIds: readonly string[]): void {
+	const task = requiredTask(options.store, taskId);
+	const blocked = options.store.quarantinedOutbox().find((record) => envelopeIds.includes(record.envelope.envelopeId) && sameEndpoint(record.envelope.target, task.target));
+	if (blocked === undefined) return;
+	throw new TaskOutboxDeliveryError(blocked.errorCode, blocked.reason, {
+		retryable: false,
+		details: { ...blocked.details, taskId, envelopeId: blocked.envelope.envelopeId, target: task.target, blockedAt: blocked.quarantinedAt },
+	});
 }
 
 function throwIfTerminalDeliveryBlocked(store: TaskStore, taskId: string): void {

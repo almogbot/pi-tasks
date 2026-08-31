@@ -43,6 +43,45 @@ test("returns structured relay metadata and the persisted task id after assignme
 	});
 });
 
+test("reports canonical origin cancellation with a structured blocked-delivery warning", async () => {
+	const tools: Record<string, Tool> = {};
+	const origin = { relay: "memory", id: "origin" } as const;
+	const target = { relay: "memory", id: "receiver" } as const;
+	const core = {
+		endpoint: origin,
+		async submitIntent(): Promise<never> {
+			throw new TaskOutboxDeliveryError("TARGET_NOT_REGISTERED", "target is inactive", {
+				retryable: false,
+				details: { taskId: "task-1", envelopeId: "cancel-envelope", target, blockedAt: 1, targetId: target.id },
+			});
+		},
+		getTask(taskId: string) {
+			return { taskId, origin, target, status: "cancelled" };
+		},
+	} as unknown as TaskCore;
+	registerAgentTaskTools({
+		on(): void { undefined; },
+		registerTool(tool: unknown): void { const value = tool as Tool; tools[value.name] = value; },
+	} as unknown as ExtensionAPI, core);
+
+	const result = await tools.agent_task_cancel!.execute("call", { taskId: "task-1" }, new AbortController().signal, undefined, {});
+
+	expect(result.details).toEqual({
+		taskId: "task-1",
+		status: "cancelled",
+		warnings: [{
+			code: "TARGET_NOT_REGISTERED",
+			message: "target is inactive",
+			retryable: false,
+			delivery: "blocked",
+			target,
+			details: { targetId: target.id },
+		}],
+	});
+	expect(result.content[0]?.text).toContain("canonical status: cancelled");
+	expect(result.content[0]?.text).toContain("receiver incorporation not confirmed");
+});
+
 test("continues timeout and inbox processing while reporting degraded outbox delivery", async () => {
 	let sessionStart: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
 	let sessionShutdown: (() => void) | undefined;
