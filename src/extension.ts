@@ -258,8 +258,17 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		name: "agent_task_done", label: "Complete Agent Task", description: "Persist a terminal task intent before relay submission.", parameters: DoneParams,
 		async execute(_id, params, signal) {
 			try {
-				await (await configuredCore(signal)).submitIntent({ taskId: params.taskId, type: `task.${params.status}`, payload: { summary: params.summary, ...(params.result === undefined ? {} : { result: params.result }), ...(params.error === undefined ? {} : { error: params.error }), ...(params.artifacts === undefined ? {} : { artifacts: params.artifacts }) } }, signal);
-				return { ...toolResult({ taskId: params.taskId }, `## task ${params.status}\n- task: \`${params.taskId}\`\n- ${params.summary}`), terminate: true };
+				const activeCore = await configuredCore(signal);
+				try {
+					await activeCore.submitIntent({ taskId: params.taskId, type: `task.${params.status}`, payload: { summary: params.summary, ...(params.result === undefined ? {} : { result: params.result }), ...(params.error === undefined ? {} : { error: params.error }), ...(params.artifacts === undefined ? {} : { artifacts: params.artifacts }) } }, signal);
+				} catch (error) {
+					return blockedDoneResult(activeCore, params.taskId, params.status, error) ?? taskError(error);
+				}
+				const task = activeCore.getTask(params.taskId);
+				if (!task) return taskError(new Error("unknown local task"));
+				const deliveryOutcome = task.terminalDelivery.state === "accepted" ? "accepted" : "recorded";
+				const result = toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, terminalDelivery: task.terminalDelivery }, `## terminal intent ${deliveryOutcome}\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- observed canonical status: ${task.status}\n- ${params.summary}`);
+				return task.terminalDelivery.state === "accepted" || terminal(task.status) ? { ...result, terminate: true } : result;
 			} catch (error) { return taskError(error); }
 		}, renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
@@ -294,26 +303,41 @@ function taskError(error: unknown): AgentToolResult<unknown> {
 }
 
 function blockedCancellationResult(core: TaskCore, taskId: string, error: unknown): AgentToolResult<unknown> | undefined {
-	if (!(error instanceof TaskOutboxDeliveryError) || error.code !== TARGET_NOT_REGISTERED_CODE || error.retryable || error.details?.taskId !== taskId) return undefined;
+	if (!(error instanceof TaskOutboxDeliveryError) || error.details?.taskId !== taskId) return undefined;
 	const task = core.getTask(taskId);
-	if (task?.status !== "cancelled" || !sameEndpoint(task.origin, core.endpoint)) return undefined;
+	const warning = task === undefined ? undefined : blockedDeliveryWarning(error, task.target);
+	if (task?.status !== "cancelled" || !sameEndpoint(task.origin, core.endpoint) || warning === undefined) return undefined;
+	return toolResult({ taskId, status: "cancelled", warnings: [warning] }, `## task cancelled\n- task: \`${taskId}\`\n- canonical status: cancelled\n- target delivery: blocked; receiver incorporation not confirmed`);
+}
+
+function blockedDoneResult(core: TaskCore, taskId: string, requestedStatus: string, error: unknown): AgentToolResult<unknown> | undefined {
+	if (!(error instanceof TaskOutboxDeliveryError)) return undefined;
+	const task = core.getTask(taskId);
+	if (task === undefined) return undefined;
+	if (!sameEndpoint(task.origin, core.endpoint) && task.terminalDelivery.state === "delivery_blocked" && task.terminalDelivery.intentType === `task.${requestedStatus}`) {
+		return toolResult({
+			taskId,
+			status: task.status,
+			terminalDelivery: task.terminalDelivery,
+			error: { code: error.code, message: error.message, retryable: error.retryable },
+		}, `## terminal intent delivery blocked\n- task: \`${taskId}\`\n- canonical status: ${task.status}\n- canonical completion not confirmed; retry remains allowed`);
+	}
+	const warning = blockedDeliveryWarning(error, task.target);
+	if (!sameEndpoint(task.origin, core.endpoint) || task.status !== requestedStatus || warning === undefined) return undefined;
+	return {
+		...toolResult({ taskId, status: task.status, warnings: [warning] }, `## task ${task.status}\n- task: \`${taskId}\`\n- canonical status: ${task.status}\n- target delivery: blocked; receiver incorporation not confirmed`),
+		terminate: true,
+	};
+}
+
+function blockedDeliveryWarning(error: TaskOutboxDeliveryError, target: TaskEndpoint): Readonly<Record<string, unknown>> | undefined {
+	if (error.code !== TARGET_NOT_REGISTERED_CODE || error.retryable) return undefined;
 	const details = { ...error.details };
 	delete details.taskId;
 	delete details.envelopeId;
 	delete details.target;
 	delete details.blockedAt;
-	return toolResult({
-		taskId,
-		status: "cancelled",
-		warnings: [{
-			code: error.code,
-			message: error.message,
-			retryable: false,
-			delivery: "blocked",
-			target: task.target,
-			details,
-		}],
-	}, `## task cancelled\n- task: \`${taskId}\`\n- canonical status: cancelled\n- target delivery: blocked; receiver incorporation not confirmed`);
+	return { code: error.code, message: error.message, retryable: false, delivery: "blocked", target, details };
 }
 
 function outboxFailureStatus(error: unknown): "tasks: relay unavailable" | "tasks: outbox degraded" {
