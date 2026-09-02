@@ -58,10 +58,14 @@ describe("gateway package documentation", () => {
 		expect(`${readme}\n${skill}`).not.toContain("task-adapter-contract.md");
 	});
 
-	test("documents prompt-free disposable workers and safe active-turn insertion", async () => {
+	test("documents prompt-free disposable workers, role models, and safe active-turn insertion", async () => {
 		const [readme, skill] = await Promise.all([readFile(readmePath, "utf8"), readFile(delegationSkillPath, "utf8")]);
 		for (const document of [readme, skill]) {
-			expect(document).toContain("wolfpack agent spawn <project> --name <task-role> --json");
+			expect(document).toContain('wolfpack agent spawn <project> --name <task-role> --model "$IMPLEMENTER_MODEL" --json');
+			expect(document).toContain("WOLFPACK_IMPLEMENTER_MODEL");
+			expect(document).toContain("WOLFPACK_REVIEWER_MODEL");
+			expect(document).toContain("openai-codex/gpt-5.6-terra");
+			expect(document).toContain("openai-codex/gpt-5.6-sol");
 			expect(document).toContain("agent_task_send.task");
 			expect(document).toContain('`deliverAs: "followUp"`');
 		}

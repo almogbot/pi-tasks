@@ -16,11 +16,22 @@ choose exactly one mode for the initial assignment:
 
 never combine a plan-driven spawn with a narrower endpoint task. prefer one cohesive implementation handoff per approved PR or phase; split only at a real approval, design, isolation, or blocker boundary—not per issue, commit, finding, or verification checkpoint. the remaining v2 workflow below describes endpoint mode.
 
+## role model selection
+
+Pi role models are explicit and configurable at spawn time:
+
+```bash
+IMPLEMENTER_MODEL="${WOLFPACK_IMPLEMENTER_MODEL:-openai-codex/gpt-5.6-terra}"
+REVIEWER_MODEL="${WOLFPACK_REVIEWER_MODEL:-openai-codex/gpt-5.6-sol}"
+```
+
+Pass `--model "$IMPLEMENTER_MODEL"` when spawning the editing implementer and `--model "$REVIEWER_MODEL"` when spawning the read-only reviewer. an explicit user or project model choice overrides the environment/default. never infer role or model from the session name, and never omit the resolved model because the current parent default may differ.
+
 ## v2 requirements and addressing
 
 - load this package's default extension in every participating Pi process and set `WOLFPACK_SESSION_NAME`. Set `WOLFPACK_PORT` only when the local Wolfpack control port differs from `18790`.
 - address `agent_task_send` targets only as `to: { relay, id }`. For the default Wolfpack adapter, the relay is `wolfpack-pi-tasks-v2` and the ID is opaque.
-- create a disposable worker without an initial model prompt: `wolfpack agent spawn <project> --name <task-role> --json`. Do not start a disposable worker with a blocking “wait for assignments” prompt. Put the complete instructions in `agent_task_send.task`.
+- create a disposable worker without an initial assignment prompt: `wolfpack agent spawn <project> --name <task-role> --model "$IMPLEMENTER_MODEL" --json` (or `"$REVIEWER_MODEL"` for review). Do not start a disposable worker with a blocking “wait for assignments” prompt. Put the complete instructions in `agent_task_send.task`.
 - after the target extension registers, run structured session control (`wolfpack session status <session> --json`) and read its `taskEndpoint`. Do not derive endpoint IDs from session names, broker IDs, terminal labels, output, or prose.
 - pass the returned endpoint without translation:
 

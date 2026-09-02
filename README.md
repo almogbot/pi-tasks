@@ -26,7 +26,14 @@ Wolfpack's relay owns durable mailbox delivery and peer forwarding; Pi owns task
 
 ### v2 delegation workflow
 
-1. create or select a role session. For a disposable worker, omit an initial model prompt: `wolfpack agent spawn <project> --name <task-role> --json`. Put all worker instructions in `agent_task_send.task` so the new Pi process can become idle before assignment.
+Configure Pi role models with `WOLFPACK_IMPLEMENTER_MODEL` and `WOLFPACK_REVIEWER_MODEL`; they default to `openai-codex/gpt-5.6-terra` and `openai-codex/gpt-5.6-sol`, respectively. Explicit user or project choices override those defaults.
+
+```bash
+IMPLEMENTER_MODEL="${WOLFPACK_IMPLEMENTER_MODEL:-openai-codex/gpt-5.6-terra}"
+REVIEWER_MODEL="${WOLFPACK_REVIEWER_MODEL:-openai-codex/gpt-5.6-sol}"
+```
+
+1. create or select a role session. For a disposable worker, omit an initial assignment prompt and pass the resolved role model: `wolfpack agent spawn <project> --name <task-role> --model "$IMPLEMENTER_MODEL" --json` (or `"$REVIEWER_MODEL"` for review). Put all worker instructions in `agent_task_send.task` so the new Pi process can become idle before assignment.
 2. verify structured session readiness, wait for extension registration, and read `taskEndpoint` from `wolfpack session status <session> --json`.
 3. call `agent_task_send` with that endpoint and the complete task instructions. Keep working; use `agent_task_status` or `agent_task_inbox` for structured evidence, and call `agent_task_wait` only when the user explicitly asks to block.
 4. use `agent_task_message` for durable questions, answers, and information. The receiver calls `agent_task_done` as its final action; no completion prose follows.
@@ -140,7 +147,7 @@ On start or resume it rebuilds incorporated IDs from the full durable session en
 
 ## parent workflow
 
-1. create or select a Wolfpack Pi session with the canonical session-control workflow and retain its stable broker ID. Spawn a disposable worker without an initial model prompt using `wolfpack agent spawn <project> --name <task-role> --json` so it reaches idle before assignment; put worker instructions in `agent_task_send.task`.
+1. create or select a Wolfpack Pi session with the canonical session-control workflow and retain its stable broker ID. Spawn a disposable worker without an initial assignment prompt using `wolfpack agent spawn <project> --name <task-role> --model "$IMPLEMENTER_MODEL" --json` (or `"$REVIEWER_MODEL"` for review) so it reaches idle before assignment; put worker instructions in `agent_task_send.task`.
 2. before remote dispatch, complete Wolfpack's [Live-peer readiness checklist](https://github.com/almogdepaz/wolfpack/blob/main/docs/task-gateway.md#live-peer-readiness-checklist) and retain operator-recorded package/reload evidence; only then check the target's local requirements and send compact instructions with curated context and selected refs when they save receiver investigation.
 3. keep working; use `agent_task_status` or `agent_task_inbox` for structured follow-up, and `agent_task_message` for questions, answers, and decisions.
 4. verify cited files, diffs, tests, and paths-only artifact metadata independently before reporting success.
