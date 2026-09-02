@@ -39,6 +39,8 @@ REVIEWER_MODEL="${WOLFPACK_REVIEWER_MODEL:-openai-codex/gpt-5.6-sol}"
 4. use `agent_task_message` for durable questions, answers, and information. The receiver calls `agent_task_done` as its final action; no completion prose follows.
 5. independently verify the result, call `agent_task_ack({ taskId })` once for that terminal task, then explicitly retain or close only the role sessions the parent spawned.
 
+Coordinator-capable agents may delegate further when justified, and the spawning coordinator owns each child's lifecycle. After terminal completion and acknowledgment, deliberately retain the child or run `wolfpack kill <stable-session-id> --json`, then verify that exact ID is absent from `wolfpack list --json`. Never use `wolfpack session send`, `/exit`, or `/quit` for cleanup; terminal input is not Wolfpack teardown.
+
 ### v2 worker-only execution gate
 
 Set `PI_TASK_WORKER=1` only when launching a task-only worker. The exact value enables a fail-closed model `tool_call` gate; an absent value or any other value leaves ordinary interactive Pi behavior unchanged. Before assignment, only `agent_task_inbox`, `agent_task_status`, and `agent_task_wait` are allowed. Other current and future model tools are blocked with the stable reason `PI_TASK_WORKER_ASSIGNMENT_REQUIRED`. Explicit user `!`/`!!` shell commands are outside Pi's model `tool_call` event and are not intercepted.

@@ -130,6 +130,16 @@ describe("gateway package documentation", () => {
 		]) expect(skill).toContain(detail);
 	});
 
+	test("makes spawning coordinators own canonical child teardown", async () => {
+		const [readme, skill] = await Promise.all([readFile(readmePath, "utf8"), readFile(delegationSkillPath, "utf8")]);
+		for (const document of [readme, skill]) {
+			expect(document).toContain("spawning coordinator");
+			expect(document).toContain("wolfpack kill <stable-session-id> --json");
+			expect(document).toContain("wolfpack list --json");
+			expect(document).toContain("Never use `wolfpack session send`, `/exit`, or `/quit` for cleanup");
+		}
+	});
+
 	test("documents task workers as leaf roles rather than nested coordinators", async () => {
 		const [readme, skill] = await Promise.all([readFile(readmePath, "utf8"), readFile(delegationSkillPath, "utf8")]);
 		for (const document of [readme, skill]) {

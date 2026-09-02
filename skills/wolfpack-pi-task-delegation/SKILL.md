@@ -49,6 +49,8 @@ The default `agent_task_send` schema is exactly `to`, `task`, and optional `time
 
 For a multi-step project phase, retain one persistent implementer and one persistent read-only reviewer. Give the implementer the whole approved phase, including required commit ordering and focused verification, rather than opening one task per issue or checkpoint. Reuse a healthy role session for corrections and follow-up review; a completed task finishes one assignment, not the underlying session. Do not rotate a healthy role session for routine corrections. Rotate only for phase completion, material context degradation, harness failure, or required specialist independence. Keep at most one active assignment per role unless the user explicitly approves parallel work.
 
+A coordinator-capable agent may delegate further when the quality or throughput gain justifies it. The spawning coordinator owns each child's complete lifecycle: record the stable session ID, acknowledge its terminal task once, then deliberately retain the child or close it with `wolfpack kill <stable-session-id> --json` and verify that exact ID is absent from `wolfpack list --json`.
+
 `PI_TASK_WORKER=1` sessions are leaf roles. Workers cannot call `agent_task_send`; workers cannot call `agent_task_cancel`; workers cannot call `agent_task_ack`. These coordinator-tool attempts are blocked with the stable reason `PI_TASK_WORKER_COORDINATION_FORBIDDEN`, not the pre-assignment reason. They may use `agent_task_message` only for the eligible incorporated assignment named by its input `taskId`. Generic role-orchestration guidance applies only to non-worker coordinators. Task workers must not create, rotate, or close Wolfpack sessions through shell or session-control tools.
 
 After every verified and acknowledged terminal task, explicitly retain a parent-spawned session only when concrete follow-up is likely; otherwise close it through canonical Wolfpack session control. Workers never close their own sessions. terminal `send` is only for explicit human steering; it is not task state, completion evidence, or a substitute for `agent_task_message`.
@@ -60,11 +62,11 @@ After every verified and acknowledged terminal task, explicitly retain a parent-
 | assignment completion | worker | `agent_task_done` | unchanged |
 | task acknowledgment | parent | `agent_task_ack` | unchanged |
 | role session retention | parent | `none` | retained for reuse |
-| role session teardown | parent | `wolfpack kill <session-or-id> --json` | exact stable session id terminated |
-| teardown verification | parent | `wolfpack list --json` | exact stable session id absent |
-| Pi exit | none | `/quit` | not Wolfpack teardown |
+| role session teardown | spawning coordinator | `wolfpack kill <stable-session-id> --json` | exact stable session id terminated |
+| teardown verification | spawning coordinator | `wolfpack list --json` | exact stable session id absent |
+| Pi exit | none | `/exit` or `/quit` | not Wolfpack teardown |
 
-Assignment completion ends the assigned task, not the reusable role session. When no further reuse is likely, the parent—not the worker—must pass the exact stable session ID to `wolfpack kill <session-or-id> --json`, then inspect `wolfpack list --json` and verify that ID is absent. `/quit` exits Pi; it is not Wolfpack teardown. Workers never close themselves.
+Assignment completion ends the assigned task, not the reusable role session. When no further reuse is likely, the coordinator that spawned the role—not the worker itself—must pass the exact stable session ID to `wolfpack kill <stable-session-id> --json`, then inspect `wolfpack list --json` and verify that ID is absent. Never use `wolfpack session send`, `/exit`, or `/quit` for cleanup: they are terminal interaction, not Wolfpack teardown. Do not guess lifecycle commands. Workers never close themselves.
 
 ## v2 workflow
 
