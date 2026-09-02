@@ -14,7 +14,7 @@ interface Tool {
 	readonly name: string;
 	readonly description: string;
 	readonly parameters: unknown;
-	execute(id: string, parameters: Record<string, unknown>, signal: AbortSignal, update: undefined, context: unknown): Promise<{ readonly content: readonly { readonly text: string }[]; readonly details: unknown }>;
+	execute(id: string, parameters: Record<string, unknown>, signal: AbortSignal, update: undefined, context: unknown): Promise<{ readonly content: readonly { readonly text: string }[]; readonly details: unknown; readonly terminate?: boolean }>;
 }
 
 test("registers endpoint-owned tools with only relay-qualified opaque targets", async () => {
@@ -34,6 +34,244 @@ test("registers endpoint-owned tools with only relay-qualified opaque targets", 
 
 	await tools.agent_task_message!.execute("call", { taskId: "parent-1", type: "information", message: "owner update" }, new AbortController().signal, undefined, {});
 	expect(core.getTask("parent-1")?.events.at(-1)?.type).toBe("task.information");
+});
+
+test("status and inbox expose an active assignment only to its receiver", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const assignment = "inspect the receiver-only payload";
+	const created = await origin.createTask({ target: receiver.endpoint, task: assignment, timeoutMs: 1_000 });
+	await receiver.receive();
+	const originTools: Record<string, Tool> = {};
+	const receiverTools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; originTools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; receiverTools[value.name] = value; } } as unknown as ExtensionAPI, receiver);
+	const signal = new AbortController().signal;
+	const receiverEntries: unknown[] = [];
+	const receiverContext = { sessionManager: { getEntries: (): readonly unknown[] => receiverEntries } };
+
+	const preInsertionStatus = await receiverTools.agent_task_status!.execute("call", { taskId: created.taskId }, signal, undefined, receiverContext);
+	const preInsertionInbox = await receiverTools.agent_task_inbox!.execute("call", {}, signal, undefined, receiverContext);
+	const originStatus = await originTools.agent_task_status!.execute("call", { taskId: created.taskId }, signal, undefined, {});
+	const originInbox = await originTools.agent_task_inbox!.execute("call", {}, signal, undefined, {});
+
+	expect(preInsertionStatus.content[0]?.text).not.toContain(assignment);
+	expect(preInsertionInbox.content[0]?.text).not.toContain(assignment);
+	expect(originStatus.content[0]?.text).not.toContain(assignment);
+	expect(originInbox.content[0]?.text).not.toContain(assignment);
+
+	const createdEventId = receiver.getTask(created.taskId)?.events[0]?.eventId;
+	receiverEntries.push({ type: "custom_message", customType: "pi-tasks-event", details: { taskId: created.taskId, eventId: createdEventId } });
+	const receiverStatus = await receiverTools.agent_task_status!.execute("call", { taskId: created.taskId }, signal, undefined, receiverContext);
+	const receiverInbox = await receiverTools.agent_task_inbox!.execute("call", {}, signal, undefined, receiverContext);
+	expect(receiverStatus.content[0]?.text).toContain(assignment);
+	expect(receiverInbox.content[0]?.text).toContain(assignment);
+});
+
+test("origin status reports structured receiver persistence and blocked Pi insertion evidence", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "report blocked insertion", timeoutMs: 1_000 });
+	await receiver.receive();
+	const createdEventId = receiver.getTask(created.taskId)?.events[0]?.eventId ?? "";
+	await receiver.submitIntent({ taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: createdEventId, stage: "receiver_persisted", state: "confirmed" } });
+	await receiver.submitIntent({ taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: createdEventId, stage: "pi_insertion", state: "blocked", retryable: true } });
+	await origin.receive();
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+
+	const status = await tools.agent_task_status!.execute("call", { taskId: created.taskId }, new AbortController().signal, undefined, {});
+
+	expect(status.details).toMatchObject({
+		deliveryEvidence: {
+			receiverPersistence: "confirmed",
+			piInsertion: "blocked",
+			wakeAcceptance: "not_confirmed",
+			modelExecution: "not_evidenced",
+		},
+	});
+	expect(status.content[0]?.text).toContain("Pi insertion: blocked; retryable");
+});
+
+test("done tool reports successful origin-owned completion as canonical rather than an unsubmitted receiver intent", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "complete at origin", timeoutMs: 1_000 });
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+
+	const result = await tools.agent_task_done!.execute("call", { taskId: created.taskId, status: "completed", summary: "finished" }, new AbortController().signal, undefined, {});
+
+	expect(result.details).toEqual({
+		taskId: created.taskId,
+		requestedStatus: "completed",
+		observedCanonicalStatus: "completed",
+		canonicalCompletion: { state: "confirmed", status: "completed" },
+	});
+	expect(result.content[0]?.text).toContain("## task completed");
+	expect(result.content[0]?.text).not.toContain("terminal intent");
+	expect(result.terminate).toBe(true);
+});
+
+test("done tool keeps a reused canonical origin cancellation distinct from a late terminal", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "retry canonical cancellation", timeoutMs: 1_000 });
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+	const signal = new AbortController().signal;
+	await tools.agent_task_done!.execute("call-1", { taskId: created.taskId, status: "cancelled", summary: "cancel" }, signal, undefined, {});
+
+	const retry = await tools.agent_task_done!.execute("call-2", { taskId: created.taskId, status: "cancelled", summary: "retry cancel" }, signal, undefined, {});
+
+	expect(retry.details).toEqual({
+		taskId: created.taskId,
+		requestedStatus: "cancelled",
+		observedCanonicalStatus: "cancelled",
+		canonicalCompletion: { state: "confirmed", status: "cancelled" },
+	});
+	expect(retry.content[0]?.text).toContain("## task cancelled");
+	expect(origin.getTask(created.taskId)?.events.map((event) => event.type)).toEqual(["task.created", "task.cancelled"]);
+});
+
+test("done tool reports an origin-owned late terminal as a canonical event", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "record late terminal", timeoutMs: 1_000 });
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+	const signal = new AbortController().signal;
+	await tools.agent_task_done!.execute("call-1", { taskId: created.taskId, status: "completed", summary: "finished" }, signal, undefined, {});
+	await tools.agent_task_done!.execute("call-2", { taskId: created.taskId, status: "cancelled", summary: "late cancellation" }, signal, undefined, {});
+	await origin.submitIntent({ taskId: created.taskId, type: "task.information", payload: { message: "later event" } });
+	expect(origin.getTask(created.taskId)?.events.at(-1)?.type).toBe("task.information");
+
+	const result = await tools.agent_task_done!.execute("call-3", { taskId: created.taskId, status: "cancelled", summary: "retry late cancellation" }, signal, undefined, {});
+
+	expect(result.details).toEqual({
+		taskId: created.taskId,
+		requestedStatus: "cancelled",
+		observedCanonicalStatus: "completed",
+		canonicalEvent: { type: "task.late_terminal", reused: true },
+	});
+	expect(result.content[0]?.text).toContain("## canonical late terminal recorded");
+	expect(result.content[0]?.text).not.toContain("terminal intent");
+	expect(result.terminate).toBe(true);
+});
+
+test("done tool reports accepted terminal intent after observing canonical cancellation", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "cancel before completion", timeoutMs: 1_000 });
+	await receiver.receive();
+	await origin.submitIntent({ taskId: created.taskId, type: "task.cancelled", payload: {} });
+	await receiver.receive();
+	expect(receiver.getTask(created.taskId)?.status).toBe("cancelled");
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, receiver);
+
+	const result = await tools.agent_task_done!.execute("call", { taskId: created.taskId, status: "completed", summary: "finished" }, new AbortController().signal, undefined, {});
+	await origin.receive();
+
+	expect(result.details).toMatchObject({
+		taskId: created.taskId,
+		requestedStatus: "completed",
+		observedCanonicalStatus: "cancelled",
+		terminalDelivery: { state: "accepted", intentType: "task.completed" },
+	});
+	expect(result.content[0]?.text).toContain("## terminal intent accepted");
+	expect(result.content[0]?.text).toContain("observed canonical status: cancelled");
+	expect(result.content[0]?.text).not.toContain("## task completed");
+	expect(result.terminate).toBe(true);
+	expect(origin.getTask(created.taskId)?.status).toBe("cancelled");
+	expect(origin.getTask(created.taskId)?.events.map((event) => event.type)).toEqual(["task.created", "task.cancelled", "task.late_terminal"]);
+});
+
+test("done tool preserves blocked receiver terminal evidence without claiming canonical completion", async () => {
+	const state = { blocked: false };
+	const relay = expiringTargetRelay(state, "parent");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "complete after origin disappears", timeoutMs: 1_000 });
+	await receiver.receive();
+	state.blocked = true;
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, receiver);
+
+	const result = await tools.agent_task_done!.execute("call", { taskId: created.taskId, status: "completed", summary: "finished" }, new AbortController().signal, undefined, {});
+
+	expect(result.details).toMatchObject({
+		taskId: created.taskId,
+		status: "active",
+		terminalDelivery: {
+			state: "delivery_blocked",
+			intentType: "task.completed",
+			origin: origin.endpoint,
+			error: { code: "TARGET_NOT_REGISTERED", retryable: false, details: { targetId: origin.endpoint.id } },
+		},
+		error: { code: "TARGET_NOT_REGISTERED", message: "target is inactive", retryable: false },
+	});
+	expect(result.content[0]?.text).toContain("## terminal intent delivery blocked");
+	expect(result.content[0]?.text).toContain("canonical completion not confirmed");
+	expect(result.content[0]?.text).not.toContain("## task completed");
+	expect(result.terminate).toBeUndefined();
+	expect(receiver.getTask(created.taskId)?.status).toBe("active");
+});
+
+test("done tool reports canonical origin completion with a blocked target-delivery warning", async () => {
+	const state = { blocked: false };
+	const relay = expiringTargetRelay(state);
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "complete before target delivery", timeoutMs: 1_000 });
+	await receiver.receive();
+	state.blocked = true;
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+
+	const result = await tools.agent_task_done!.execute("call", { taskId: created.taskId, status: "completed", summary: "finished" }, new AbortController().signal, undefined, {});
+
+	expect(result.details).toEqual({
+		taskId: created.taskId,
+		status: "completed",
+		warnings: [{
+			code: "TARGET_NOT_REGISTERED",
+			message: "target is inactive",
+			retryable: false,
+			delivery: "blocked",
+			target: receiver.endpoint,
+			details: { targetId: receiver.endpoint.id },
+		}],
+	});
+	expect(result.content[0]?.text).toContain("## task completed");
+	expect(result.content[0]?.text).toContain("canonical status: completed");
+	expect(result.content[0]?.text).toContain("target delivery: blocked");
+	expect(result.content[0]?.text).not.toContain("terminal intent");
+	expect(result.content[0]?.text).not.toContain("## task error");
+	expect(result.terminate).toBe(true);
+	expect(origin.getTask(created.taskId)?.status).toBe("completed");
 });
 
 test("cancel tool preserves completed-task late-terminal behavior", async () => {
@@ -166,14 +404,14 @@ test("publishes the supported core and relay contract independently from the Pi 
 	expect(packageJson.module).toBe("src/index.ts");
 });
 
-function expiringTargetRelay(state: { blocked: boolean }): TaskRelay {
+function expiringTargetRelay(state: { blocked: boolean }, blockedTargetId = "child"): TaskRelay {
 	const relay = createInMemoryTaskRelay("memory");
 	return {
 		id: relay.id,
 		async connect(input) { return relay.connect(input); },
 		async resolve(input) { return relay.resolve(input); },
 		async send(input) {
-			if (state.blocked && input.target.id === "child") throw new TaskProtocolError("TARGET_NOT_REGISTERED", "target is inactive", { retryable: false, details: { targetId: input.target.id } });
+			if (state.blocked && input.target.id === blockedTargetId) throw new TaskProtocolError("TARGET_NOT_REGISTERED", "target is inactive", { retryable: false, details: { targetId: input.target.id } });
 			return relay.send(input);
 		},
 		async receive(input) { return relay.receive(input); },

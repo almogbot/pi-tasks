@@ -5,9 +5,9 @@ import { Type } from "typebox";
 
 import { abortableSleep } from "./abortable-sleep";
 import { deliverTaskInbox, incorporatedTaskEvents } from "./task-inbox";
-import { TaskOutboxDeliveryError, TaskProtocolError } from "./task-protocol";
+import { TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError } from "./task-protocol";
 import { createWolfpackTaskCore } from "./wolfpack-task-relay";
-import type { TaskCore } from "./task-core";
+import type { SubmitIntentInput, SubmitIntentOutcome, TaskCore } from "./task-core";
 import type { TaskEndpoint, TaskSnapshot } from "./task-protocol";
 
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -64,7 +64,6 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	let inboxContext: ExtensionContext | undefined;
 	let backgroundTimer: ReturnType<typeof setInterval> | undefined;
 	let lifecycleEpoch = 0;
-	const pendingInsertions = new Set<string>();
 	const closingTaskIds = new Set<string>();
 	const workerGateEnabled = process.env.PI_TASK_WORKER === "1";
 	const configuredCore: ConfiguredCoreFactory = core === undefined ? createConfiguredCoreLoader(createCore) : async (): Promise<TaskCore> => core;
@@ -104,9 +103,10 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 			sendMessage(message, options) { if (isCurrent()) pi.sendMessage(message, options); },
 			appendEntry(customType, data) { if (isCurrent()) pi.appendEntry(customType, data); },
 		}, guardedCore, {
+			isIdle: (): boolean => isCurrent() && context.isIdle(),
 			hasPendingMessages: (): boolean => !isCurrent() || context.hasPendingMessages(),
 			sessionManager: context.sessionManager,
-		}, pendingInsertions, signal);
+		}, signal);
 		return outboxError;
 	});
 	const refreshLifecycle = async (context: ExtensionContext, epoch: number): Promise<void> => {
@@ -157,7 +157,6 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 
 	pi.on("session_start", async (_event, context) => {
-		pendingInsertions.clear();
 		closingTaskIds.clear();
 		const epoch = ++lifecycleEpoch;
 		inboxContext = context;
@@ -173,8 +172,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		inboxContext = context;
 		await refreshLifecycle(context, epoch);
 	});
+	pi.on("agent_settled", async (_event, context) => {
+		const epoch = lifecycleEpoch;
+		inboxContext = context;
+		await refreshLifecycle(context, epoch);
+	});
 	pi.on("session_shutdown", () => {
-		pendingInsertions.clear();
 		closingTaskIds.clear();
 		lifecycleEpoch += 1;
 		if (backgroundTimer) clearInterval(backgroundTimer);
@@ -194,10 +197,13 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 	pi.registerTool({
 		name: "agent_task_status", label: "Task Status", description: "Read local endpoint-owned task state; status is unavailable while its origin is offline.", parameters: TaskIdParams,
-		async execute(_id, params, signal) {
+		async execute(_id, params, signal, _onUpdate, context) {
 			try {
-				const task = (await configuredCore(signal)).getTask(params.taskId);
-				return task ? toolResult(task, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}`) : taskError(new Error("unknown local task"));
+				const activeCore = await configuredCore(signal);
+				const task = activeCore.getTask(params.taskId);
+				if (!task) return taskError(new Error("unknown local task"));
+				const deliveryEvidence = taskDeliveryEvidence(task);
+				return toolResult({ ...task, deliveryEvidence }, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}${receiverAssignment(activeCore, task, context)}${deliveryEvidenceText(deliveryEvidence)}`);
 			} catch (error) { return taskError(error); }
 		}, renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
@@ -220,11 +226,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 	pi.registerTool({
 		name: "agent_task_inbox", label: "Task Inbox", description: "Read local task records after processing relay deliveries without acknowledging task lifecycle.", parameters: Type.Object({}),
-		async execute(_id, _params, signal) {
+		async execute(_id, _params, signal, _onUpdate, context) {
 			try {
 				await refreshInbox(signal);
-				const tasks = (await configuredCore(signal)).listTasks();
-				return toolResult({ tasks }, `## task inbox\n${tasks.map((task) => `- \`${task.taskId}\`: ${task.status}`).join("\n") || "- empty"}`);
+				const activeCore = await configuredCore(signal);
+				const tasks = activeCore.listTasks();
+				return toolResult({ tasks }, `## task inbox\n${tasks.map((task) => `- \`${task.taskId}\`: ${task.status}${receiverAssignment(activeCore, task, context)}`).join("\n") || "- empty"}`);
 			} catch (error) { return taskError(error); }
 		},
 		renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
@@ -258,8 +265,32 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		name: "agent_task_done", label: "Complete Agent Task", description: "Persist a terminal task intent before relay submission.", parameters: DoneParams,
 		async execute(_id, params, signal) {
 			try {
-				await (await configuredCore(signal)).submitIntent({ taskId: params.taskId, type: `task.${params.status}`, payload: { summary: params.summary, ...(params.result === undefined ? {} : { result: params.result }), ...(params.error === undefined ? {} : { error: params.error }), ...(params.artifacts === undefined ? {} : { artifacts: params.artifacts }) } }, signal);
-				return { ...toolResult({ taskId: params.taskId }, `## task ${params.status}\n- task: \`${params.taskId}\`\n- ${params.summary}`), terminate: true };
+				const activeCore = await configuredCore(signal);
+				let submission: SubmitIntentOutcome | undefined;
+				try {
+					const input: SubmitIntentInput = { taskId: params.taskId, type: `task.${params.status}`, payload: { summary: params.summary, ...(params.result === undefined ? {} : { result: params.result }), ...(params.error === undefined ? {} : { error: params.error }), ...(params.artifacts === undefined ? {} : { artifacts: params.artifacts }) } };
+					if (activeCore.submitIntentWithOutcome) submission = await activeCore.submitIntentWithOutcome(input, signal);
+					else await activeCore.submitIntent(input, signal);
+				} catch (error) {
+					return blockedDoneResult(activeCore, params.taskId, params.status, error) ?? taskError(error);
+				}
+				const task = activeCore.getTask(params.taskId);
+				if (!task) return taskError(new Error("unknown local task"));
+				if (submission?.authority === "origin" && submission.canonicalEvent.type === "task.late_terminal") {
+					return {
+						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalEvent: submission.canonicalEvent }, `## canonical late terminal recorded\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- canonical status remains: ${task.status}\n- ${params.summary}`),
+						terminate: true,
+					};
+				}
+				if (submission?.authority === "origin" && task.status === params.status) {
+					return {
+						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalCompletion: { state: "confirmed", status: task.status } }, `## task ${task.status}\n- task: \`${params.taskId}\`\n- canonical status: ${task.status}\n- ${params.summary}`),
+						terminate: true,
+					};
+				}
+				const deliveryOutcome = task.terminalDelivery.state === "accepted" ? "accepted" : "recorded";
+				const result = toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, terminalDelivery: task.terminalDelivery }, `## terminal intent ${deliveryOutcome}\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- observed canonical status: ${task.status}\n- ${params.summary}`);
+				return task.terminalDelivery.state === "accepted" || terminal(task.status) ? { ...result, terminate: true } : result;
 			} catch (error) { return taskError(error); }
 		}, renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
@@ -281,6 +312,37 @@ export default function piTasks(pi: ExtensionAPI): void {
 	registerAgentTaskTools(pi);
 }
 
+interface TaskDeliveryEvidence {
+	readonly receiverPersistence: "not_confirmed" | "confirmed";
+	readonly piInsertion: "not_confirmed" | "blocked" | "confirmed";
+	readonly wakeAcceptance: "not_confirmed" | "pending" | "confirmed";
+	readonly modelExecution: "not_evidenced";
+}
+
+function taskDeliveryEvidence(task: TaskSnapshot): TaskDeliveryEvidence {
+	let receiverPersistence: TaskDeliveryEvidence["receiverPersistence"] = "not_confirmed";
+	let piInsertion: TaskDeliveryEvidence["piInsertion"] = "not_confirmed";
+	let wakeAcceptance: TaskDeliveryEvidence["wakeAcceptance"] = "not_confirmed";
+	const assignmentEventId = task.events.find((event) => event.type === "task.created")?.eventId;
+	for (const event of task.events) {
+		if (event.type !== "task.delivery_receipt" || event.payload.eventId !== assignmentEventId) continue;
+		if (event.payload.stage === TaskDeliveryStage.receiverPersisted) receiverPersistence = "confirmed";
+		if (event.payload.stage === TaskDeliveryStage.piInsertion && event.payload.state === TaskDeliveryEvidenceState.blocked) piInsertion = "blocked";
+		if (event.payload.stage === TaskDeliveryStage.piInserted || event.payload.stage === undefined) {
+			receiverPersistence = "confirmed";
+			piInsertion = "confirmed";
+		}
+		if (event.payload.stage === TaskDeliveryStage.wakeRequested) wakeAcceptance = "pending";
+		if (event.payload.stage === TaskDeliveryStage.wakeAccepted) wakeAcceptance = "confirmed";
+	}
+	return { receiverPersistence, piInsertion, wakeAcceptance, modelExecution: "not_evidenced" };
+}
+
+function deliveryEvidenceText(evidence: TaskDeliveryEvidence): string {
+	const insertion = evidence.piInsertion === "blocked" ? "blocked; retryable" : evidence.piInsertion;
+	return `\n- receiver persistence: ${evidence.receiverPersistence}\n- Pi insertion: ${insertion}\n- wake acceptance: ${evidence.wakeAcceptance}\n- model execution: ${evidence.modelExecution}`;
+}
+
 function toolResult(details: unknown, markdown: string): AgentToolResult<unknown> {
 	return { content: [{ type: "text", text: markdown }], details };
 }
@@ -294,26 +356,41 @@ function taskError(error: unknown): AgentToolResult<unknown> {
 }
 
 function blockedCancellationResult(core: TaskCore, taskId: string, error: unknown): AgentToolResult<unknown> | undefined {
-	if (!(error instanceof TaskOutboxDeliveryError) || error.code !== TARGET_NOT_REGISTERED_CODE || error.retryable || error.details?.taskId !== taskId) return undefined;
+	if (!(error instanceof TaskOutboxDeliveryError) || error.details?.taskId !== taskId) return undefined;
 	const task = core.getTask(taskId);
-	if (task?.status !== "cancelled" || !sameEndpoint(task.origin, core.endpoint)) return undefined;
+	const warning = task === undefined ? undefined : blockedDeliveryWarning(error, task.target);
+	if (task?.status !== "cancelled" || !sameEndpoint(task.origin, core.endpoint) || warning === undefined) return undefined;
+	return toolResult({ taskId, status: "cancelled", warnings: [warning] }, `## task cancelled\n- task: \`${taskId}\`\n- canonical status: cancelled\n- target delivery: blocked; receiver incorporation not confirmed`);
+}
+
+function blockedDoneResult(core: TaskCore, taskId: string, requestedStatus: string, error: unknown): AgentToolResult<unknown> | undefined {
+	if (!(error instanceof TaskOutboxDeliveryError)) return undefined;
+	const task = core.getTask(taskId);
+	if (task === undefined) return undefined;
+	if (!sameEndpoint(task.origin, core.endpoint) && task.terminalDelivery.state === "delivery_blocked" && task.terminalDelivery.intentType === `task.${requestedStatus}`) {
+		return toolResult({
+			taskId,
+			status: task.status,
+			terminalDelivery: task.terminalDelivery,
+			error: { code: error.code, message: error.message, retryable: error.retryable },
+		}, `## terminal intent delivery blocked\n- task: \`${taskId}\`\n- canonical status: ${task.status}\n- canonical completion not confirmed; retry remains allowed`);
+	}
+	const warning = blockedDeliveryWarning(error, task.target);
+	if (!sameEndpoint(task.origin, core.endpoint) || task.status !== requestedStatus || warning === undefined) return undefined;
+	return {
+		...toolResult({ taskId, status: task.status, warnings: [warning] }, `## task ${task.status}\n- task: \`${taskId}\`\n- canonical status: ${task.status}\n- target delivery: blocked; receiver incorporation not confirmed`),
+		terminate: true,
+	};
+}
+
+function blockedDeliveryWarning(error: TaskOutboxDeliveryError, target: TaskEndpoint): Readonly<Record<string, unknown>> | undefined {
+	if (error.code !== TARGET_NOT_REGISTERED_CODE || error.retryable) return undefined;
 	const details = { ...error.details };
 	delete details.taskId;
 	delete details.envelopeId;
 	delete details.target;
 	delete details.blockedAt;
-	return toolResult({
-		taskId,
-		status: "cancelled",
-		warnings: [{
-			code: error.code,
-			message: error.message,
-			retryable: false,
-			delivery: "blocked",
-			target: task.target,
-			details,
-		}],
-	}, `## task cancelled\n- task: \`${taskId}\`\n- canonical status: cancelled\n- target delivery: blocked; receiver incorporation not confirmed`);
+	return { code: error.code, message: error.message, retryable: false, delivery: "blocked", target, details };
 }
 
 function outboxFailureStatus(error: unknown): "tasks: relay unavailable" | "tasks: outbox degraded" {
@@ -322,6 +399,13 @@ function outboxFailureStatus(error: unknown): "tasks: relay unavailable" | "task
 
 function terminal(status: string): boolean {
 	return ["completed", "failed", "cancelled", "timed_out"].includes(status);
+}
+
+function receiverAssignment(core: TaskCore, task: TaskSnapshot, context: Pick<ExtensionContext, "sessionManager">): string {
+	if (task.status !== "active" || sameEndpoint(task.origin, core.endpoint) || !sameEndpoint(task.target, core.endpoint)) return "";
+	const created = task.events.find((event) => event.type === "task.created");
+	if (!created || !incorporatedTaskEvents(context.sessionManager.getEntries()).some((evidence) => evidence.taskId === task.taskId && evidence.eventId === created.eventId)) return "";
+	return `\n\n## task assignment\n${task.task}`;
 }
 
 function assignedWorkerTasks(core: TaskCore, entries: readonly unknown[]): readonly TaskSnapshot[] {
