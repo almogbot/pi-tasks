@@ -4,24 +4,50 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { createTaskStore } from "../src/task-store";
-import { TaskEnvelopeKind } from "../src/task-protocol";
-import type { RelayEnvelope, TaskEvent, TaskIntent } from "../src/task-protocol";
+import type { RelayEnvelope } from "../src/task-protocol";
 
 const temporaryDirectories: string[] = [];
+const nodeHandleProbe = `
+	import { readdirSync } from "node:fs";
+	const { createTaskStore } = await import(process.argv[1]);
+	const countOpenDescriptors = () => readdirSync("/dev/fd").length;
+	const before = countOpenDescriptors();
+	let failures = 0;
+	for (let attempt = 0; attempt < 8; attempt += 1) {
+		try {
+			createTaskStore({ path: process.argv[2] });
+			process.exitCode = 1;
+		} catch {
+			failures += 1;
+		}
+	}
+	console.log(JSON.stringify({ before, after: countOpenDescriptors(), failures }));
+`;
 
 afterEach(() => {
 	for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-test("creates an owner-only sqlite store and rejects an unsafe existing directory", () => {
+test("creates an owner-only current-schema sqlite store and reopens it", () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-store-");
 	temporaryDirectories.push(directory);
 	chmodSync(directory, 0o700);
 	const path = join(directory, "v2", "tasks.sqlite");
 	const store = createTaskStore({ path });
+	store.putTask({
+		taskId: "task-1", protocolVersion: "pi-tasks/v2", origin: { relay: "relay", id: "origin" }, target: { relay: "relay", id: "target" },
+		task: "survives restart", createdAt: 1, expiresAt: 2, status: "active",
+	});
 	store.close();
+
 	expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
 	expect(statSync(path).mode & 0o777).toBe(0o600);
+	const reopened = createTaskStore({ path });
+	expect(reopened.getTask("task-1")?.task).toBe("survives restart");
+	reopened.close();
+	const checked = new Database(path, { readonly: true });
+	expect((checked.query("PRAGMA user_version").get() as { readonly user_version: number }).user_version).toBe(5);
+	checked.close();
 
 	const unsafe = join(directory, "unsafe");
 	mkdirSync(unsafe);
@@ -29,82 +55,75 @@ test("creates an owner-only sqlite store and rejects an unsafe existing director
 	expect(() => createTaskStore({ path: join(unsafe, "tasks.sqlite") })).toThrow("not owner-only");
 });
 
-test("migrates an operator-created quarantine table without losing audit rows", () => {
-	const directory = mkdtempSync("/tmp/pi-tasks-store-");
-	temporaryDirectories.push(directory);
-	chmodSync(directory, 0o700);
-	const path = join(directory, "tasks.sqlite");
-	const initial = createTaskStore({ path });
-	initial.close();
-
-	const legacy = new Database(path);
-	legacy.exec(`
-		DROP TABLE outbox_quarantine;
-		CREATE TABLE outbox_quarantine (envelope_id TEXT PRIMARY KEY, envelope TEXT NOT NULL, reason TEXT NOT NULL, quarantined_at INTEGER NOT NULL);
-		INSERT INTO outbox_quarantine VALUES ('audit-envelope', '{}', 'operator quarantine', 123);
-		PRAGMA user_version = 3;
-	`);
-	legacy.close();
-
-	const migrated = createTaskStore({ path });
-	migrated.close();
-	const checked = new Database(path, { readonly: true });
-	const columns = checked.query("PRAGMA table_info(outbox_quarantine)").all() as Array<{ readonly name: string }>;
-	const audit = checked.query("SELECT envelope_id, reason, quarantined_at, error_code, details, prior_state FROM outbox_quarantine").get();
-	expect(columns.map((column) => column.name)).toEqual(["envelope_id", "envelope", "reason", "quarantined_at", "error_code", "details", "prior_state"]);
-	expect(audit).toEqual({ envelope_id: "audit-envelope", reason: "operator quarantine", quarantined_at: 123, error_code: "UNKNOWN", details: "{}", prior_state: "pending" });
-	expect((checked.query("PRAGMA user_version").get() as { readonly user_version: number }).user_version).toBe(5);
-	checked.close();
-});
-
-test("v4 migration adopts existing terminal intents and parent acknowledgment identities", () => {
+test("rejects every non-current schema version without changing stored data", () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-store-");
 	temporaryDirectories.push(directory);
 	chmodSync(directory, 0o700);
 	const path = join(directory, "tasks.sqlite");
 	const store = createTaskStore({ path });
-	const origin = { relay: "relay", id: "origin" };
-	const receiver = { relay: "relay", id: "receiver" };
-	for (const [index, state] of (["pending", "accepted", "blocked"] as const).entries()) {
-		const taskId = `terminal-${state}`;
-		const intent: TaskIntent = { intentId: `intent-${state}`, taskId, type: "task.completed", payload: { summary: state } };
-		const envelope = protocolEnvelope(`envelope-${state}`, receiver, origin, taskId, TaskEnvelopeKind.intent, intent);
-		store.putTask({ taskId, protocolVersion: "pi-tasks/v2", origin, target: receiver, task: state, createdAt: index + 1, expiresAt: 100, status: "active" });
-		store.putIntent(intent.intentId, taskId, envelope.envelopeId);
-		store.putOutbox(envelope);
-		if (state === "accepted") store.markOutboxAccepted(envelope.envelopeId);
-		if (state === "blocked") {
-			store.transaction(() => store.quarantineOutbox(envelope.envelopeId, {
-				errorCode: "TARGET_NOT_REGISTERED", reason: "origin inactive", details: { targetId: origin.id }, quarantinedAt: 50,
-			}));
-		}
-	}
-	const taskId = "acknowledged-task";
-	const acknowledgment: TaskEvent = {
-		eventId: "legacy-ack", taskId, type: "task.parent_acknowledged", sequence: "3", source: origin, target: receiver, occurredAt: 20, payload: { intentId: "legacy-ack-intent" },
-	};
-	store.putTask({ taskId, protocolVersion: "pi-tasks/v2", origin, target: receiver, task: "ack", createdAt: 1, expiresAt: 100, status: "completed" });
-	store.appendEvent(acknowledgment);
-	for (const [envelopeId, target] of [["ack-target", receiver], ["ack-origin", origin]] as const) {
-		const envelope = protocolEnvelope(envelopeId, origin, target, taskId, TaskEnvelopeKind.canonicalEvent, acknowledgment);
-		store.putOutbox(envelope);
-		store.markOutboxAccepted(envelopeId);
-	}
+	store.putTask({
+		taskId: "preserved-task", protocolVersion: "pi-tasks/v2", origin: { relay: "relay", id: "origin" }, target: { relay: "relay", id: "target" },
+		task: "do not mutate", createdAt: 1, expiresAt: 2, status: "active",
+	});
 	store.close();
 
-	const legacy = new Database(path);
-	legacy.exec("DROP TABLE task_operations; PRAGMA user_version = 4;");
-	legacy.close();
-	const migrated = createTaskStore({ path });
+	for (const version of [4, 6]) {
+		const database = new Database(path);
+		database.exec(`PRAGMA user_version = ${version};`);
+		database.close();
 
-	expect(migrated.getTask("terminal-pending")?.terminalDelivery).toMatchObject({ state: "pending", intentId: "intent-pending", envelopeId: "envelope-pending" });
-	expect(migrated.getTask("terminal-accepted")?.terminalDelivery).toMatchObject({ state: "accepted", intentId: "intent-accepted", envelopeId: "envelope-accepted" });
-	expect(migrated.getTask("terminal-blocked")?.terminalDelivery).toMatchObject({ state: "delivery_blocked", intentId: "intent-blocked", envelopeId: "envelope-blocked" });
-	expect(migrated.reserveTaskOperation({ taskId, operation: "parent_acknowledgment", logicalId: "new-ack", logicalType: "task.parent_acknowledged", envelopeIds: ["new-envelope"] })).toEqual({
-		created: false,
-		record: { taskId, operation: "parent_acknowledgment", logicalId: "legacy-ack", logicalType: "task.parent_acknowledged", envelopeIds: ["ack-origin", "ack-target"] },
+		expect(() => createTaskStore({ path })).toThrow("task store schema version is unsupported");
+		const checked = new Database(path, { readonly: true });
+		expect((checked.query("PRAGMA user_version").get() as { readonly user_version: number }).user_version).toBe(version);
+		expect(checked.query("SELECT task, status FROM tasks WHERE task_id = 'preserved-task'").get()).toEqual({ task: "do not mutate", status: "active" });
+		checked.close();
+	}
+});
+
+test("closes Node database handles after repeated unsupported-schema failures", async () => {
+	const directory = mkdtempSync("/tmp/pi-tasks-store-");
+	temporaryDirectories.push(directory);
+	chmodSync(directory, 0o700);
+	const path = join(directory, "unsupported.sqlite");
+	const database = new Database(path);
+	database.exec("PRAGMA user_version = 4;");
+	database.close();
+	chmodSync(path, 0o600);
+	const bundlePath = join(directory, "task-store.mjs");
+	const build = Bun.spawn(["bun", "build", new URL("../src/task-store.ts", import.meta.url).pathname, "--target=node", "--outfile", bundlePath], {
+		cwd: new URL("..", import.meta.url).pathname,
+		stdout: "pipe",
+		stderr: "pipe",
 	});
-	migrated.close();
+	expect(await build.exited).toBe(0);
+
+	const subprocess = Bun.spawn(["node", "--input-type=module", "--eval", nodeHandleProbe, bundlePath, path], { stdout: "pipe", stderr: "pipe" });
+	const [exitCode, stdout] = await Promise.all([subprocess.exited, new Response(subprocess.stdout).text()]);
+	const counts = JSON.parse(stdout) as { readonly before: number; readonly after: number; readonly failures: number };
+
+	expect(exitCode).toBe(0);
+	expect(counts.failures).toBe(8);
+	expect(counts.after).toBe(counts.before);
+});
+
+test("atomically rejects a zero-version database with a conflicting schema object", () => {
+	const directory = mkdtempSync("/tmp/pi-tasks-store-");
+	temporaryDirectories.push(directory);
+	chmodSync(directory, 0o700);
+	const path = join(directory, "conflicting.sqlite");
+	const database = new Database(path);
+	database.exec("CREATE TABLE events (marker TEXT PRIMARY KEY); INSERT INTO events VALUES ('preserved');");
+	database.close();
+	chmodSync(path, 0o600);
+
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		expect(() => createTaskStore({ path })).toThrow();
+		const checked = new Database(path, { readonly: true });
+		expect((checked.query("PRAGMA user_version").get() as { readonly user_version: number }).user_version).toBe(0);
+		expect(checked.query("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all()).toEqual([{ type: "table", name: "events" }]);
+		expect(checked.query("SELECT marker FROM events").get()).toEqual({ marker: "preserved" });
+		checked.close();
+	}
 });
 
 test("atomically reserves one durable task operation identity", () => {
@@ -187,34 +206,6 @@ test("preserves an existing quarantine audit row when removing a colliding live 
 	expect(store.outbox("pending")).toEqual([]);
 	store.close();
 });
-
-test("migrates a file-backed v1 store without losing task records", () => {
-	const directory = mkdtempSync("/tmp/pi-tasks-store-");
-	temporaryDirectories.push(directory);
-	chmodSync(directory, 0o700);
-	const path = join(directory, "tasks.sqlite");
-	const store = createTaskStore({ path });
-	store.putTask({
-		taskId: "task-1", protocolVersion: "pi-tasks/v2", origin: { relay: "relay", id: "origin" }, target: { relay: "relay", id: "target" },
-		task: "preserve", createdAt: 1, expiresAt: 2, status: "active",
-	});
-	store.close();
-
-	const legacy = new Database(path);
-	legacy.exec("DROP INDEX tasks_origin_expiry; DROP INDEX inbox_cursor; DROP TABLE insertion_receipts; PRAGMA user_version = 1;");
-	legacy.close();
-
-	const migrated = createTaskStore({ path });
-	expect(migrated.getTask("task-1")?.task).toBe("preserve");
-	migrated.close();
-	const checked = new Database(path, { readonly: true });
-	expect((checked.query("PRAGMA user_version").get() as { readonly user_version: number }).user_version).toBe(5);
-	checked.close();
-});
-
-function protocolEnvelope(envelopeId: string, source: { readonly relay: string; readonly id: string }, target: { readonly relay: string; readonly id: string }, taskId: string, kind: RelayEnvelope["kind"], payload: TaskIntent | TaskEvent): RelayEnvelope {
-	return { envelopeId, protocolVersion: "pi-tasks/v2", source, target, taskId, kind, payload: JSON.stringify(payload) };
-}
 
 function assignment(envelopeId: string, source: { readonly relay: string; readonly id: string }, targetId: string): RelayEnvelope {
 	return {

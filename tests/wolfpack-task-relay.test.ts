@@ -120,17 +120,17 @@ test("first endpoint binding preserves all pending work and the cursor", async (
 	temporaryDirectories.push(directory);
 	const path = join(directory, "tasks.sqlite");
 	const endpoint = { relay: "wolfpack-pi-tasks-v2", id: "first-endpoint" };
-	const legacyEndpoint = { relay: "wolfpack-pi-tasks-v2", id: "legacy-endpoint" };
+	const unrelatedEndpoint = { relay: "wolfpack-pi-tasks-v2", id: "unrelated-endpoint" };
 	const store = createTaskStore({ path });
 	store.setReceiveCursor("7");
 	store.putOutbox(assignment("pending-first-binding", endpoint, "receiver"));
-	store.putOutbox(assignment("pending-legacy-source", legacyEndpoint, "receiver"));
+	store.putOutbox(assignment("pending-unrelated-source", unrelatedEndpoint, "receiver"));
 
 	await createWolfpackTaskCore({ sessionName: "first-binding", generation: "first-generation", path, fetch: registrationFetch(endpoint) });
 
 	expect(store.getEndpointBinding()).toEqual(endpoint);
 	expect(store.getReceiveCursor()).toBe("7");
-	expect(store.outbox("pending").map((record) => record.envelope.envelopeId)).toEqual(["pending-first-binding", "pending-legacy-source"]);
+	expect(store.outbox("pending").map((record) => record.envelope.envelopeId)).toEqual(["pending-first-binding", "pending-unrelated-source"]);
 	expect(store.quarantinedOutbox()).toEqual([]);
 	store.close();
 });
@@ -195,18 +195,18 @@ test("isolates default durable state by Wolfpack session and reuses one session 
 	}
 });
 
-test("does not fall back to the legacy global sqlite store", async () => {
-	const directory = mkdtempSync("/tmp/pi-tasks-no-global-fallback-");
+test("isolates per-session state from an explicitly selected alternate store", async () => {
+	const directory = mkdtempSync("/tmp/pi-tasks-isolated-store-");
 	temporaryDirectories.push(directory);
 	const previousHome = process.env.HOME;
 	process.env.HOME = directory;
 	try {
-		const legacyPath = join(directory, ".pi", "tasks", "v2", "tasks.sqlite");
-		const legacy = await createWolfpackTaskCore({ baseUrl, sessionName: "legacy-writer", path: legacyPath, ids: sequence("legacy") });
-		const legacyTask = await legacy.createTask({ target: { relay: "wolfpack-pi-tasks-v2", id: "receiver" }, task: "legacy global state", timeoutMs: 1_000 });
-		const sessionCore = await createWolfpackTaskCore({ baseUrl, sessionName: "no-legacy-fallback", ids: sequence("session") });
+		const alternatePath = join(directory, ".pi", "tasks", "v2", "tasks.sqlite");
+		const alternateCore = await createWolfpackTaskCore({ baseUrl, sessionName: "alternate-writer", path: alternatePath, ids: sequence("alternate") });
+		const alternateTask = await alternateCore.createTask({ target: { relay: "wolfpack-pi-tasks-v2", id: "receiver" }, task: "alternate state", timeoutMs: 1_000 });
+		const sessionCore = await createWolfpackTaskCore({ baseUrl, sessionName: "session-isolation", ids: sequence("session") });
 
-		expect(sessionCore.getTask(legacyTask.taskId)).toBeUndefined();
+		expect(sessionCore.getTask(alternateTask.taskId)).toBeUndefined();
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;

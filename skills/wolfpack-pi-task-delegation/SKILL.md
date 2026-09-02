@@ -43,7 +43,7 @@ Pass `--model "$IMPLEMENTER_MODEL"` when spawning the editing implementer and `-
 }
 ```
 
-The default `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. v1-only fields such as context, role, metadata, preflight, idempotency keys, and completion prompts are not silently accepted or translated. use at least `3600000` milliseconds for coding assignments; timeout is a failure deadline, not a progress-poll interval.
+The default `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. Unsupported fields are rejected rather than translated. use at least `3600000` milliseconds for coding assignments; timeout is a failure deadline, not a progress-poll interval.
 
 ## phase roles and handoffs
 
@@ -85,21 +85,11 @@ Receiver terminal submission has one task-wide logical identity. Same-status ret
 
 Set `PI_TASK_WORKER=1` only for task-only workers. Before a valid structured assignment matches a locally owned active task, the worker gate allows only inbox/status/wait inspection and blocks other model tools with `PI_TASK_WORKER_ASSIGNMENT_REQUIRED`.
 
-## v1 compatibility
-
-The retained v1 workflow is available only through the explicit `@sgtbeatdown/pi-tasks/v1-compat-extension` entrypoint. It does not load by default, and v2 never falls back or translates its targets.
-
-v1 uses a reachable local Wolfpack task gateway and addresses targets as `to: { machine, sessionId }`. Use `machine: "local"` for same-machine work; remote work uses only the receiver's canonical HTTPS Tailnet origin. v1 trusts local processes and trusted Tailnet machines, has no JWT federation, and follows Wolfpack's [task gateway guide](https://github.com/almogdepaz/wolfpack/blob/main/docs/task-gateway.md).
-
-Before v1 remote dispatch, complete the [Live-peer readiness checklist](https://github.com/almogdepaz/wolfpack/blob/main/docs/task-gateway.md#live-peer-readiness-checklist), including operator-recorded package/reload evidence. If it cannot pass, stop before task creation and report fixture-only verification. Isolated coverage is the deterministic acceptance gate, but it does not prove a specific live peer.
-
-Only v1 supports curated `context.summary`/refs, role, metadata, preflight, idempotency keys, and completion prompts. Use `context.summary` only for constraints, decisions, and recovery state. Refs are metadata, not copied files or transcript. A v1 remote initial send gets one initial attempt; later peer events get four total attempts. Retry exhaustion is surfaced; v1 has no offline queue or background dispatch promise.
-
 ## do not
 
 - do not use terminal output, rendered prompts, logs, or error prose as task state.
 - do not ask workers to complete in prose or close their own sessions.
 - do not steer or interrupt an active Pi turn with task context; use the adapter's follow-up queue.
 - Do not copy plans, source contents, or transcripts into task context.
-- do not mix v1 and v2 target shapes or silently translate between them.
+- do not derive or transform opaque endpoint IDs.
 - do not promise JWT federation, artifact byte transfer, exactly-once model execution, or successor endpoint rebinding.

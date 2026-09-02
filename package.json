@@ -1,11 +1,10 @@
 {
   "name": "@sgtbeatdown/pi-tasks",
-  "version": "0.1.6",
-  "description": "Durable Pi agent delegation through the Wolfpack task gateway.",
+  "version": "0.1.7",
+  "description": "Durable endpoint-owned Pi agent delegation through Wolfpack relay v2.",
   "module": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./v1-compat-extension": "./src/v1-compat-extension.ts"
+    ".": "./src/index.ts"
   },
   "repository": {
     "type": "git",
@@ -50,7 +49,6 @@
   },
   "scripts": {
     "test": "bun test",
-    "task-metrics": "bun src/metrics-cli.ts",
     "typecheck": "tsc --noEmit"
   },
   "type": "module"

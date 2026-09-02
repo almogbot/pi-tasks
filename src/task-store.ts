@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { openSqliteDatabase } from "./sqlite-database";
 import type { SqliteDatabase } from "./sqlite-database";
-import { PARENT_ACKNOWLEDGMENT_OPERATION, TERMINAL_INTENT_OPERATION } from "./task-protocol";
+import { TERMINAL_INTENT_OPERATION } from "./task-protocol";
 import type { RelayEnvelope, TaskEndpoint, TaskEvent, TaskRecord, TaskSnapshot, TerminalDeliveryState, TerminalTaskIntentType } from "./task-protocol";
 
 const SCHEMA_VERSION = 5;
@@ -71,8 +71,13 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
 	const path = options.path ?? join(homedir(), ".pi", "tasks", "v2", "tasks.sqlite");
 	preparePath(path);
 	const database = openSqliteDatabase(path);
-	database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
-	migrate(database);
+	try {
+		initializeSchema(database);
+		database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+	} catch (error) {
+		database.close();
+		throw error;
+	}
 
 	const store: TaskStore = {
 		transaction(operation) {
@@ -213,17 +218,6 @@ interface TaskOperationRow {
 	readonly envelope_ids: string;
 }
 
-interface LegacyIntentRow {
-	readonly intent_id: string;
-	readonly task_id: string;
-	readonly envelope_id: string;
-}
-
-interface LegacyEnvelopeRow {
-	readonly envelope_id: string;
-	readonly envelope: string;
-}
-
 interface EventRow {
 	readonly event_id: string;
 	readonly task_id: string;
@@ -237,10 +231,11 @@ interface EventRow {
 	readonly payload: string;
 }
 
-function migrate(database: SqliteDatabase): void {
+function initializeSchema(database: SqliteDatabase): void {
 	const version = database.query("PRAGMA user_version").get() as { readonly user_version: number };
-	if (version.user_version > SCHEMA_VERSION) throw new Error("task store schema is newer than this pi-tasks version");
-	if (version.user_version === 0) {
+	if (version.user_version === SCHEMA_VERSION) return;
+	if (version.user_version !== 0) throw new Error("task store schema version is unsupported");
+	database.transaction(() => {
 		database.exec(`
 			CREATE TABLE tasks (task_id TEXT PRIMARY KEY, protocol_version TEXT NOT NULL, origin_relay TEXT NOT NULL, origin_id TEXT NOT NULL, target_relay TEXT NOT NULL, target_id TEXT NOT NULL, task TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL);
 			CREATE TABLE events (event_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id), type TEXT NOT NULL, sequence TEXT NOT NULL, source_relay TEXT NOT NULL, source_id TEXT NOT NULL, target_relay TEXT NOT NULL, target_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, payload TEXT NOT NULL);
@@ -248,137 +243,29 @@ function migrate(database: SqliteDatabase): void {
 			CREATE TABLE inbox (envelope_id TEXT PRIMARY KEY, cursor TEXT NOT NULL, envelope TEXT NOT NULL);
 			CREATE TABLE intents (intent_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, envelope_id TEXT NOT NULL);
 			CREATE TABLE relay_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);
-			PRAGMA user_version = 1;
-		`);
-	}
-	if (version.user_version <= 1) {
-		database.exec(`
-			CREATE INDEX IF NOT EXISTS tasks_origin_expiry ON tasks (origin_relay, origin_id, status, expires_at);
-			CREATE INDEX IF NOT EXISTS inbox_cursor ON inbox (cursor);
-			PRAGMA user_version = 2;
-		`);
-	}
-	if (version.user_version <= 2) {
-		database.exec(`
 			CREATE TABLE insertion_receipts (task_id TEXT NOT NULL REFERENCES tasks(task_id), event_id TEXT NOT NULL, PRIMARY KEY (task_id, event_id));
-			PRAGMA user_version = 3;
-		`);
-	}
-	if (version.user_version <= 3) {
-		database.exec(`CREATE TABLE IF NOT EXISTS outbox_quarantine (
-			envelope_id TEXT PRIMARY KEY,
-			envelope TEXT NOT NULL,
-			reason TEXT NOT NULL,
-			quarantined_at INTEGER NOT NULL,
-			error_code TEXT NOT NULL DEFAULT 'UNKNOWN',
-			details TEXT NOT NULL DEFAULT '{}',
-			prior_state TEXT NOT NULL DEFAULT 'pending'
-		);`);
-		ensureColumn(database, "outbox_quarantine", "envelope", "TEXT NOT NULL DEFAULT '{}'");
-		ensureColumn(database, "outbox_quarantine", "reason", "TEXT NOT NULL DEFAULT 'operator quarantine'");
-		ensureColumn(database, "outbox_quarantine", "quarantined_at", "INTEGER NOT NULL DEFAULT 0");
-		ensureColumn(database, "outbox_quarantine", "error_code", "TEXT NOT NULL DEFAULT 'UNKNOWN'");
-		ensureColumn(database, "outbox_quarantine", "details", "TEXT NOT NULL DEFAULT '{}'");
-		ensureColumn(database, "outbox_quarantine", "prior_state", "TEXT NOT NULL DEFAULT 'pending'");
-		database.exec("PRAGMA user_version = 4;");
-	}
-	if (version.user_version <= 4) {
-		database.transaction(() => {
-			database.exec(`CREATE TABLE IF NOT EXISTS task_operations (
+			CREATE TABLE outbox_quarantine (
+				envelope_id TEXT PRIMARY KEY,
+				envelope TEXT NOT NULL,
+				reason TEXT NOT NULL,
+				quarantined_at INTEGER NOT NULL,
+				error_code TEXT NOT NULL,
+				details TEXT NOT NULL,
+				prior_state TEXT NOT NULL
+			);
+			CREATE TABLE task_operations (
 				task_id TEXT NOT NULL REFERENCES tasks(task_id),
 				operation TEXT NOT NULL,
 				logical_id TEXT NOT NULL,
 				logical_type TEXT NOT NULL,
 				envelope_ids TEXT NOT NULL,
 				PRIMARY KEY (task_id, operation)
-			);`);
-			backfillTaskOperations(database);
-			database.exec("PRAGMA user_version = 5;");
-		})();
-	}
-}
-
-function backfillTaskOperations(database: SqliteDatabase): void {
-	const envelopes = legacyEnvelopes(database);
-	const terminalTasks = new Set<string>();
-	const intents = database.query("SELECT intent_id, task_id, envelope_id FROM intents ORDER BY rowid").all() as LegacyIntentRow[];
-	for (const intent of intents) {
-		if (terminalTasks.has(intent.task_id)) continue;
-		const serializedEnvelope = envelopes.get(intent.envelope_id);
-		if (!serializedEnvelope) throw new Error(`legacy intent ${intent.intent_id} has no durable envelope`);
-		const envelope = legacyEnvelope(intent.envelope_id, serializedEnvelope);
-		const payload = legacyEnvelopePayload(envelope);
-		if (envelope.kind !== "intent" || envelope.taskId !== intent.task_id || !isRecord(payload) || payload.intentId !== intent.intent_id || payload.taskId !== intent.task_id || typeof payload.type !== "string") {
-			throw new Error(`legacy intent ${intent.intent_id} has malformed structured state`);
-		}
-		if (!isTerminalIntentType(payload.type)) continue;
-		insertTaskOperation(database, { taskId: intent.task_id, operation: TERMINAL_INTENT_OPERATION, logicalId: intent.intent_id, logicalType: payload.type, envelopeIds: [intent.envelope_id] });
-		terminalTasks.add(intent.task_id);
-	}
-
-	const acknowledgments = database.query("SELECT * FROM events WHERE type = 'task.parent_acknowledged' ORDER BY task_id, CAST(sequence AS INTEGER), rowid").all() as EventRow[];
-	const acknowledgedTasks = new Set<string>();
-	for (const acknowledgment of acknowledgments) {
-		if (acknowledgedTasks.has(acknowledgment.task_id)) continue;
-		const envelopeIds = [...envelopes]
-			.flatMap(([envelopeId, serializedEnvelope]) => {
-				const envelope = optionalLegacyEnvelope(envelopeId, serializedEnvelope);
-				return envelope?.kind === "canonical_event" && envelope.taskId === acknowledgment.task_id && eventIdFromLegacyEnvelope(envelope) === acknowledgment.event_id ? [envelopeId] : [];
-			})
-			.sort();
-		if (envelopeIds.length === 0) throw new Error(`legacy parent acknowledgment ${acknowledgment.event_id} has no durable envelope`);
-		insertTaskOperation(database, { taskId: acknowledgment.task_id, operation: PARENT_ACKNOWLEDGMENT_OPERATION, logicalId: acknowledgment.event_id, logicalType: acknowledgment.type, envelopeIds });
-		acknowledgedTasks.add(acknowledgment.task_id);
-	}
-}
-
-function legacyEnvelopes(database: SqliteDatabase): Map<string, string> {
-	const envelopes = new Map<string, string>();
-	const live = database.query("SELECT envelope_id, envelope FROM outbox ORDER BY rowid").all() as LegacyEnvelopeRow[];
-	const quarantined = database.query("SELECT envelope_id, envelope FROM outbox_quarantine ORDER BY rowid").all() as LegacyEnvelopeRow[];
-	for (const row of [...live, ...quarantined]) {
-		if (row.envelope_id.length === 0) throw new Error("legacy durable envelope identity is malformed");
-		if (!envelopes.has(row.envelope_id)) envelopes.set(row.envelope_id, row.envelope);
-	}
-	return envelopes;
-}
-
-function legacyEnvelope(envelopeId: string, serializedEnvelope: string): RelayEnvelope {
-	const envelope = parseEnvelope(serializedEnvelope);
-	if (envelope.envelopeId !== envelopeId) throw new Error(`legacy envelope ${envelopeId} identity is malformed`);
-	return envelope;
-}
-
-function optionalLegacyEnvelope(envelopeId: string, serializedEnvelope: string): RelayEnvelope | undefined {
-	try {
-		return legacyEnvelope(envelopeId, serializedEnvelope);
-	} catch {
-		// Unrelated operator quarantine rows are audit data, not lifecycle state.
-		return undefined;
-	}
-}
-
-function legacyEnvelopePayload(envelope: RelayEnvelope): unknown {
-	try {
-		return JSON.parse(envelope.payload) as unknown;
-	} catch {
-		throw new Error(`legacy envelope ${envelope.envelopeId} payload is malformed`);
-	}
-}
-
-function eventIdFromLegacyEnvelope(envelope: RelayEnvelope): string | undefined {
-	const payload = legacyEnvelopePayload(envelope);
-	return isRecord(payload) && typeof payload.eventId === "string" ? payload.eventId : undefined;
-}
-
-function insertTaskOperation(database: SqliteDatabase, input: TaskOperationRecord): void {
-	database.query(`INSERT INTO task_operations (task_id, operation, logical_id, logical_type, envelope_ids)
-		VALUES (?, ?, ?, ?, ?) ON CONFLICT(task_id, operation) DO NOTHING`).run(input.taskId, input.operation, input.logicalId, input.logicalType, JSON.stringify(input.envelopeIds));
-}
-
-function ensureColumn(database: SqliteDatabase, table: string, name: string, definition: string): void {
-	const columns = database.query(`PRAGMA table_info(${table})`).all() as Array<{ readonly name: string }>;
-	if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+			);
+			CREATE INDEX tasks_origin_expiry ON tasks (origin_relay, origin_id, status, expires_at);
+			CREATE INDEX inbox_cursor ON inbox (cursor);
+			PRAGMA user_version = 5;
+		`);
+	})();
 }
 
 function preparePath(path: string): void {
