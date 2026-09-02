@@ -1,6 +1,6 @@
 {
   "name": "@sgtbeatdown/pi-tasks",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Durable Pi agent delegation through the Wolfpack task gateway.",
   "module": "src/index.ts",
   "exports": {
