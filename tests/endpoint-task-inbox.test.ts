@@ -29,7 +29,31 @@ test("persists inbound state, inserts structural evidence, then records a logica
 	expect(entries).toContainEqual({ type: "custom_message", customType: "pi-tasks-event", details: { taskId: created.taskId, eventId: "parent-2" } });
 	expect(relay.envelopesFor(receiver)).toHaveLength(1);
 	await parent.receive();
-	expect(parent.getTask(created.taskId)?.events.map((event) => event.type)).toEqual(["task.created", "task.delivery_receipt"]);
+	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload.stage)).toEqual([
+		"receiver_persisted", "pi_inserted", "wake_requested", "wake_accepted",
+	]);
+});
+
+test("reports receiver persistence and blocked Pi insertion to the origin without advancing delivery", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("parent") });
+	const childStore = createTaskStore({ path: ":memory:" });
+	const child = createTaskCore({ endpoint: receiver, relay, store: childStore, ids: ids("child") });
+	await parent.connect();
+	await child.connect();
+	const created = await parent.createTask({ target: receiver, task: "implement", timeoutMs: 1_000 });
+	const context = { isIdle: (): boolean => true, hasPendingMessages: (): boolean => false, sessionManager: { getEntries: (): readonly unknown[] => [] } };
+	const pi = { sendMessage(): void { undefined; }, appendEntry(): void { undefined; } };
+
+	await deliverTaskInbox(pi, child, context);
+	await deliverTaskInbox(pi, child, context);
+	await parent.receive();
+
+	expect(childStore.getReceiveCursor()).toBe("0");
+	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload)).toEqual([
+		expect.objectContaining({ stage: "receiver_persisted", state: "confirmed" }),
+		expect.objectContaining({ stage: "pi_insertion", state: "blocked", retryable: true }),
+	]);
 });
 
 test("keeps the relay delivery retryable until a separate wake is durably accepted", async () => {
@@ -68,6 +92,10 @@ test("keeps the relay delivery retryable until a separate wake is durably accept
 	expect(insertionAttempts).toBe(1);
 	expect(wakeAttempts).toBe(2);
 	expect(entries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-event" && "details" in entry && typeof entry.details === "object" && entry.details !== null && "taskId" in entry.details && entry.details.taskId === created.taskId)).toHaveLength(1);
+	await parent.receive();
+	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload.stage)).toEqual([
+		"receiver_persisted", "pi_inserted", "wake_requested", "wake_accepted",
+	]);
 });
 
 test("origin acknowledges raw receiver intents before rendering their canonical message and completion", async () => {
@@ -98,8 +126,11 @@ test("origin acknowledges raw receiver intents before rendering their canonical 
 	await deliverTaskInbox(parentPi, parent, parentContext);
 
 	expect(parent.getTask(created.taskId)?.status).toBe("completed");
-	expect(parent.getTask(created.taskId)?.events.map((event) => event.type).slice(0, 4)).toEqual(["task.created", "task.delivery_receipt", "task.information", "task.completed"]);
-	expect(parentStore.getReceiveCursor()).toBe("4");
+	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload.stage)).toEqual([
+		"receiver_persisted", "pi_inserted", "wake_requested", "wake_accepted",
+	]);
+	expect(parent.getTask(created.taskId)?.events.slice(-2).map((event) => event.type)).toEqual(["task.information", "task.completed"]);
+	expect(parentStore.getReceiveCursor()).toBe("7");
 	expect(parentEntries).toEqual([]);
 
 	await deliverTaskInbox(parentPi, parent, parentContext);

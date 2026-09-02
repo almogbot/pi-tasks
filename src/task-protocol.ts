@@ -4,6 +4,19 @@ export const ORIGIN_CANCELLATION_OPERATION = "origin_cancellation";
 export const PARENT_ACKNOWLEDGMENT_OPERATION = "parent_acknowledgment";
 export const TERMINAL_INTENT_OPERATION = "terminal_intent";
 
+export const TaskDeliveryStage = {
+	receiverPersisted: "receiver_persisted",
+	piInsertion: "pi_insertion",
+	piInserted: "pi_inserted",
+	wakeRequested: "wake_requested",
+	wakeAccepted: "wake_accepted",
+} as const;
+
+export const TaskDeliveryEvidenceState = {
+	confirmed: "confirmed",
+	blocked: "blocked",
+} as const;
+
 export interface TaskEndpoint {
 	readonly relay: string;
 	readonly id: string;
@@ -104,6 +117,9 @@ export interface TaskRecord {
 }
 
 export type TerminalTaskIntentType = "task.completed" | "task.failed" | "task.cancelled";
+
+export type TaskDeliveryStage = (typeof TaskDeliveryStage)[keyof typeof TaskDeliveryStage];
+export type TaskDeliveryEvidenceState = (typeof TaskDeliveryEvidenceState)[keyof typeof TaskDeliveryEvidenceState];
 
 export interface TaskIntent {
 	readonly intentId: string;

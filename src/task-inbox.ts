@@ -1,5 +1,5 @@
 import type { TaskCore } from "./task-core";
-import { TaskEnvelopeKind, TaskProtocolError } from "./task-protocol";
+import { TaskDeliveryEvidenceState, TaskDeliveryStage, TaskEnvelopeKind, TaskProtocolError } from "./task-protocol";
 import type { RelayDelivery, TaskEvent } from "./task-protocol";
 
 const TASK_EVENT_CUSTOM_TYPE = "pi-tasks-event";
@@ -40,6 +40,9 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 		if (context.hasPendingMessages()) return;
 		const eventDetails = { taskId: event.taskId, eventId: event.eventId };
 		const eventKey = key(event.taskId, event.eventId);
+		if (event.type === "task.created") {
+			await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.receiverPersisted, state: TaskDeliveryEvidenceState.confirmed }, signal);
+		}
 		let incorporated = incorporatedEvents(context.sessionManager.getEntries()).has(eventKey);
 		if (!incorporated && isModelVisible(event.type)) {
 			if (!context.isIdle()) return;
@@ -50,13 +53,17 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 				details: eventDetails,
 			}, { triggerTurn: false });
 			incorporated = incorporatedEvents(context.sessionManager.getEntries()).has(eventKey);
-			if (!incorporated) return;
+			if (!incorporated) {
+				await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.piInsertion, state: TaskDeliveryEvidenceState.blocked, retryable: true }, signal);
+				return;
+			}
 		}
 		if (isModelVisible(event.type)) {
 			await core.recordInsertion(eventDetails, signal);
 			let wakeAccepted = taskMessageKeys(context.sessionManager.getEntries(), TASK_WAKE_CUSTOM_TYPE).has(eventKey);
 			if (!wakeAccepted) {
 				if (!context.isIdle()) return;
+				await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.wakeRequested, state: TaskDeliveryEvidenceState.confirmed }, signal);
 				pi.sendMessage({
 					customType: TASK_WAKE_CUSTOM_TYPE,
 					content: "Process the pending Pi task event.",
@@ -66,6 +73,7 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 				wakeAccepted = taskMessageKeys(context.sessionManager.getEntries(), TASK_WAKE_CUSTOM_TYPE).has(eventKey);
 				if (!wakeAccepted) return;
 			}
+			await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.wakeAccepted, state: TaskDeliveryEvidenceState.confirmed }, signal);
 		}
 		await core.acknowledgeRelayDelivery(delivery.cursor, signal);
 		pi.appendEntry(TASK_CURSOR_CUSTOM_TYPE, { cursor: delivery.cursor });

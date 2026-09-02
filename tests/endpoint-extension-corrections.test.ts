@@ -431,6 +431,7 @@ test("keeps missing idle insertion evidence unacknowledged and retryable after p
 	let recordedInsertions = 0;
 	let acknowledgements = 0;
 	let wakes = 0;
+	const deliveryEvidence = new Set<string>();
 	const source = { relay: "memory", id: "parent" };
 	const target = { relay: "memory", id: "receiver" };
 	const delivery = {
@@ -445,6 +446,7 @@ test("keeps missing idle insertion evidence unacknowledged and retryable after p
 		async flushOutbox(): Promise<void> { undefined; },
 		async evaluateTimeouts(): Promise<void> { undefined; },
 		async receive() { return [delivery]; },
+		async recordDeliveryEvidence(input: { readonly stage: string; readonly state: string }): Promise<void> { deliveryEvidence.add(`${input.stage}:${input.state}`); },
 		async recordInsertion(): Promise<void> { recordedInsertions += 1; },
 		async acknowledgeRelayDelivery(): Promise<void> { acknowledgements += 1; },
 	} as unknown as TaskCore;
@@ -478,6 +480,7 @@ test("keeps missing idle insertion evidence unacknowledged and retryable after p
 		expect(recordedInsertions).toBe(0);
 		expect(acknowledgements).toBe(0);
 		expect(wakes).toBe(0);
+		expect([...deliveryEvidence]).toEqual(["receiver_persisted:confirmed", "pi_insertion:blocked"]);
 	} finally {
 		sessionShutdown?.();
 	}
@@ -490,6 +493,7 @@ test("persists an idle task event before sending one separate wake", async () =>
 	let idle = false;
 	let acknowledgements = 0;
 	let recordedInsertions = 0;
+	const deliveryEvidence = new Set<string>();
 	const entries: unknown[] = [];
 	const sent: Array<{ readonly customType: string; readonly triggerTurn: boolean | undefined }> = [];
 	const source = { relay: "memory", id: "parent" };
@@ -506,6 +510,7 @@ test("persists an idle task event before sending one separate wake", async () =>
 		async flushOutbox(): Promise<void> { undefined; },
 		async evaluateTimeouts(): Promise<void> { undefined; },
 		async receive() { return acknowledgements === 0 ? [delivery] : []; },
+		async recordDeliveryEvidence(input: { readonly stage: string; readonly state: string }): Promise<void> { deliveryEvidence.add(`${input.stage}:${input.state}`); },
 		async recordInsertion(): Promise<void> { recordedInsertions = 1; },
 		async acknowledgeRelayDelivery(): Promise<void> { acknowledgements += 1; },
 	} as unknown as TaskCore;
@@ -549,6 +554,7 @@ test("persists an idle task event before sending one separate wake", async () =>
 		expect(sent).toHaveLength(2);
 		expect(recordedInsertions).toBe(1);
 		expect(acknowledgements).toBe(1);
+		expect([...deliveryEvidence]).toEqual(["receiver_persisted:confirmed", "wake_requested:confirmed", "wake_accepted:confirmed"]);
 	} finally {
 		sessionShutdown?.();
 	}

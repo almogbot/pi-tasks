@@ -50,16 +50,76 @@ test("status and inbox expose an active assignment only to its receiver", async 
 	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; originTools[value.name] = value; } } as unknown as ExtensionAPI, origin);
 	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; receiverTools[value.name] = value; } } as unknown as ExtensionAPI, receiver);
 	const signal = new AbortController().signal;
+	const receiverEntries: unknown[] = [];
+	const receiverContext = { sessionManager: { getEntries: (): readonly unknown[] => receiverEntries } };
 
-	const receiverStatus = await receiverTools.agent_task_status!.execute("call", { taskId: created.taskId }, signal, undefined, {});
-	const receiverInbox = await receiverTools.agent_task_inbox!.execute("call", {}, signal, undefined, {});
+	const preInsertionStatus = await receiverTools.agent_task_status!.execute("call", { taskId: created.taskId }, signal, undefined, receiverContext);
+	const preInsertionInbox = await receiverTools.agent_task_inbox!.execute("call", {}, signal, undefined, receiverContext);
 	const originStatus = await originTools.agent_task_status!.execute("call", { taskId: created.taskId }, signal, undefined, {});
 	const originInbox = await originTools.agent_task_inbox!.execute("call", {}, signal, undefined, {});
 
-	expect(receiverStatus.content[0]?.text).toContain(assignment);
-	expect(receiverInbox.content[0]?.text).toContain(assignment);
+	expect(preInsertionStatus.content[0]?.text).not.toContain(assignment);
+	expect(preInsertionInbox.content[0]?.text).not.toContain(assignment);
 	expect(originStatus.content[0]?.text).not.toContain(assignment);
 	expect(originInbox.content[0]?.text).not.toContain(assignment);
+
+	const createdEventId = receiver.getTask(created.taskId)?.events[0]?.eventId;
+	receiverEntries.push({ type: "custom_message", customType: "pi-tasks-event", details: { taskId: created.taskId, eventId: createdEventId } });
+	const receiverStatus = await receiverTools.agent_task_status!.execute("call", { taskId: created.taskId }, signal, undefined, receiverContext);
+	const receiverInbox = await receiverTools.agent_task_inbox!.execute("call", {}, signal, undefined, receiverContext);
+	expect(receiverStatus.content[0]?.text).toContain(assignment);
+	expect(receiverInbox.content[0]?.text).toContain(assignment);
+});
+
+test("origin status reports structured receiver persistence and blocked Pi insertion evidence", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "report blocked insertion", timeoutMs: 1_000 });
+	await receiver.receive();
+	const createdEventId = receiver.getTask(created.taskId)?.events[0]?.eventId ?? "";
+	await receiver.recordDeliveryEvidence({ taskId: created.taskId, eventId: createdEventId, stage: "receiver_persisted", state: "confirmed" });
+	await receiver.recordDeliveryEvidence({ taskId: created.taskId, eventId: createdEventId, stage: "pi_insertion", state: "blocked", retryable: true });
+	await origin.receive();
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+
+	const status = await tools.agent_task_status!.execute("call", { taskId: created.taskId }, new AbortController().signal, undefined, {});
+
+	expect(status.details).toMatchObject({
+		deliveryEvidence: {
+			receiverPersistence: "confirmed",
+			piInsertion: "blocked",
+			wakeAcceptance: "not_confirmed",
+			modelExecution: "not_evidenced",
+		},
+	});
+	expect(status.content[0]?.text).toContain("Pi insertion: blocked; retryable");
+});
+
+test("done tool reports successful origin-owned completion as canonical rather than an unsubmitted receiver intent", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "complete at origin", timeoutMs: 1_000 });
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+
+	const result = await tools.agent_task_done!.execute("call", { taskId: created.taskId, status: "completed", summary: "finished" }, new AbortController().signal, undefined, {});
+
+	expect(result.details).toEqual({
+		taskId: created.taskId,
+		requestedStatus: "completed",
+		observedCanonicalStatus: "completed",
+		canonicalCompletion: { state: "confirmed", status: "completed" },
+	});
+	expect(result.content[0]?.text).toContain("## task completed");
+	expect(result.content[0]?.text).not.toContain("terminal intent");
+	expect(result.terminate).toBe(true);
 });
 
 test("done tool reports accepted terminal intent after observing canonical cancellation", async () => {

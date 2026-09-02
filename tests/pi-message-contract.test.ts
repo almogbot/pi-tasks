@@ -21,6 +21,12 @@ test("idle semantic messages persist synchronously and a triggered wake becomes 
 		sessionManager,
 		noTools: "all",
 	});
+	let agentStarts = 0;
+	let agentSettlements = 0;
+	const unsubscribe = session.subscribe((event) => {
+		if (event.type === "agent_start") agentStarts += 1;
+		if (event.type === "agent_settled") agentSettlements += 1;
+	});
 
 	try {
 		const sending = session.sendCustomMessage({
@@ -51,7 +57,10 @@ test("idle semantic messages persist synchronously and a triggered wake becomes 
 			details: { taskId: "task-1", eventId: "event-1" },
 		}));
 		expect(sessionManager.getEntries().filter((entry) => entry.type === "custom_message" && entry.customType === "pi-tasks-wake")).toHaveLength(1);
+		expect(agentStarts).toBe(1);
+		expect(agentSettlements).toBe(1);
 	} finally {
+		unsubscribe();
 		session.dispose();
 		rmSync(directory, { recursive: true, force: true });
 	}

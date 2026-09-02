@@ -5,7 +5,7 @@ import { Type } from "typebox";
 
 import { abortableSleep } from "./abortable-sleep";
 import { deliverTaskInbox, incorporatedTaskEvents } from "./task-inbox";
-import { TaskOutboxDeliveryError, TaskProtocolError } from "./task-protocol";
+import { TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError } from "./task-protocol";
 import { createWolfpackTaskCore } from "./wolfpack-task-relay";
 import type { TaskCore } from "./task-core";
 import type { TaskEndpoint, TaskSnapshot } from "./task-protocol";
@@ -197,11 +197,13 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 	pi.registerTool({
 		name: "agent_task_status", label: "Task Status", description: "Read local endpoint-owned task state; status is unavailable while its origin is offline.", parameters: TaskIdParams,
-		async execute(_id, params, signal) {
+		async execute(_id, params, signal, _onUpdate, context) {
 			try {
 				const activeCore = await configuredCore(signal);
 				const task = activeCore.getTask(params.taskId);
-				return task ? toolResult(task, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}${receiverAssignment(activeCore, task)}`) : taskError(new Error("unknown local task"));
+				if (!task) return taskError(new Error("unknown local task"));
+				const deliveryEvidence = taskDeliveryEvidence(task);
+				return toolResult({ ...task, deliveryEvidence }, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}${receiverAssignment(activeCore, task, context)}${deliveryEvidenceText(deliveryEvidence)}`);
 			} catch (error) { return taskError(error); }
 		}, renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
@@ -224,12 +226,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 	pi.registerTool({
 		name: "agent_task_inbox", label: "Task Inbox", description: "Read local task records after processing relay deliveries without acknowledging task lifecycle.", parameters: Type.Object({}),
-		async execute(_id, _params, signal) {
+		async execute(_id, _params, signal, _onUpdate, context) {
 			try {
 				await refreshInbox(signal);
 				const activeCore = await configuredCore(signal);
 				const tasks = activeCore.listTasks();
-				return toolResult({ tasks }, `## task inbox\n${tasks.map((task) => `- \`${task.taskId}\`: ${task.status}${receiverAssignment(activeCore, task)}`).join("\n") || "- empty"}`);
+				return toolResult({ tasks }, `## task inbox\n${tasks.map((task) => `- \`${task.taskId}\`: ${task.status}${receiverAssignment(activeCore, task, context)}`).join("\n") || "- empty"}`);
 			} catch (error) { return taskError(error); }
 		},
 		renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
@@ -271,6 +273,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 				}
 				const task = activeCore.getTask(params.taskId);
 				if (!task) return taskError(new Error("unknown local task"));
+				if (sameEndpoint(task.origin, activeCore.endpoint) && task.status === params.status) {
+					return {
+						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalCompletion: { state: "confirmed", status: task.status } }, `## task ${task.status}\n- task: \`${params.taskId}\`\n- canonical status: ${task.status}\n- ${params.summary}`),
+						terminate: true,
+					};
+				}
 				const deliveryOutcome = task.terminalDelivery.state === "accepted" ? "accepted" : "recorded";
 				const result = toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, terminalDelivery: task.terminalDelivery }, `## terminal intent ${deliveryOutcome}\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- observed canonical status: ${task.status}\n- ${params.summary}`);
 				return task.terminalDelivery.state === "accepted" || terminal(task.status) ? { ...result, terminate: true } : result;
@@ -293,6 +301,37 @@ export function createSingleFlightInboxRefresh<TValue>(refresh: (signal?: AbortS
 
 export default function piTasks(pi: ExtensionAPI): void {
 	registerAgentTaskTools(pi);
+}
+
+interface TaskDeliveryEvidence {
+	readonly receiverPersistence: "not_confirmed" | "confirmed";
+	readonly piInsertion: "not_confirmed" | "blocked" | "confirmed";
+	readonly wakeAcceptance: "not_confirmed" | "pending" | "confirmed";
+	readonly modelExecution: "not_evidenced";
+}
+
+function taskDeliveryEvidence(task: TaskSnapshot): TaskDeliveryEvidence {
+	let receiverPersistence: TaskDeliveryEvidence["receiverPersistence"] = "not_confirmed";
+	let piInsertion: TaskDeliveryEvidence["piInsertion"] = "not_confirmed";
+	let wakeAcceptance: TaskDeliveryEvidence["wakeAcceptance"] = "not_confirmed";
+	const assignmentEventId = task.events.find((event) => event.type === "task.created")?.eventId;
+	for (const event of task.events) {
+		if (event.type !== "task.delivery_receipt" || event.payload.eventId !== assignmentEventId) continue;
+		if (event.payload.stage === TaskDeliveryStage.receiverPersisted) receiverPersistence = "confirmed";
+		if (event.payload.stage === TaskDeliveryStage.piInsertion && event.payload.state === TaskDeliveryEvidenceState.blocked) piInsertion = "blocked";
+		if (event.payload.stage === TaskDeliveryStage.piInserted || event.payload.stage === undefined) {
+			receiverPersistence = "confirmed";
+			piInsertion = "confirmed";
+		}
+		if (event.payload.stage === TaskDeliveryStage.wakeRequested) wakeAcceptance = "pending";
+		if (event.payload.stage === TaskDeliveryStage.wakeAccepted) wakeAcceptance = "confirmed";
+	}
+	return { receiverPersistence, piInsertion, wakeAcceptance, modelExecution: "not_evidenced" };
+}
+
+function deliveryEvidenceText(evidence: TaskDeliveryEvidence): string {
+	const insertion = evidence.piInsertion === "blocked" ? "blocked; retryable" : evidence.piInsertion;
+	return `\n- receiver persistence: ${evidence.receiverPersistence}\n- Pi insertion: ${insertion}\n- wake acceptance: ${evidence.wakeAcceptance}\n- model execution: ${evidence.modelExecution}`;
 }
 
 function toolResult(details: unknown, markdown: string): AgentToolResult<unknown> {
@@ -353,8 +392,10 @@ function terminal(status: string): boolean {
 	return ["completed", "failed", "cancelled", "timed_out"].includes(status);
 }
 
-function receiverAssignment(core: TaskCore, task: TaskSnapshot): string {
+function receiverAssignment(core: TaskCore, task: TaskSnapshot, context: Pick<ExtensionContext, "sessionManager">): string {
 	if (task.status !== "active" || sameEndpoint(task.origin, core.endpoint) || !sameEndpoint(task.target, core.endpoint)) return "";
+	const created = task.events.find((event) => event.type === "task.created");
+	if (!created || !incorporatedTaskEvents(context.sessionManager.getEntries()).some((evidence) => evidence.taskId === task.taskId && evidence.eventId === created.eventId)) return "";
 	return `\n\n## task assignment\n${task.task}`;
 }
 
