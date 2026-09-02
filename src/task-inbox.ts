@@ -3,15 +3,20 @@ import { TaskEnvelopeKind, TaskProtocolError } from "./task-protocol";
 import type { RelayDelivery, TaskEvent } from "./task-protocol";
 
 const TASK_EVENT_CUSTOM_TYPE = "pi-tasks-event";
+const TASK_WAKE_CUSTOM_TYPE = "pi-tasks-wake";
 const TASK_CURSOR_CUSTOM_TYPE = "pi-tasks-relay-cursor";
 
 interface InboxContext {
+	readonly isIdle: () => boolean;
 	readonly hasPendingMessages: () => boolean;
 	readonly sessionManager: { readonly getEntries: () => readonly unknown[] };
 }
 
 interface InboxPi {
-	sendMessage(message: { readonly customType: string; readonly content: string; readonly display: boolean; readonly details: TaskEventDetails }, options: { readonly triggerTurn: true; readonly deliverAs: "followUp" }): void;
+	sendMessage(
+		message: { readonly customType: string; readonly content: string; readonly display: boolean; readonly details: TaskEventDetails },
+		options: { readonly triggerTurn: false } | { readonly triggerTurn: true; readonly deliverAs: "followUp" },
+	): void;
 	appendEntry(customType: string, data: { readonly cursor: string }): void;
 }
 
@@ -20,8 +25,8 @@ export interface TaskEventDetails {
 	readonly eventId: string;
 }
 
-/** Inserts durable Pi evidence before allowing the relay mailbox cursor to advance. */
-export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: InboxContext, pendingInsertions: Set<string>, signal?: AbortSignal): Promise<void> {
+/** Persists model-visible Pi evidence before advancing the relay cursor, then starts one separate turn. */
+export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: InboxContext, signal?: AbortSignal): Promise<void> {
 	if (context.hasPendingMessages()) return;
 	const deliveries = await core.receive(signal);
 	for (const delivery of deliveries) {
@@ -33,23 +38,35 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 		const event = inboxEvent(delivery);
 		if (!isKnownEvent(event.type)) throw new TaskProtocolError("UNKNOWN_EVENT", `unknown task inbox event type: ${event.type}`);
 		if (context.hasPendingMessages()) return;
+		const eventDetails = { taskId: event.taskId, eventId: event.eventId };
 		const eventKey = key(event.taskId, event.eventId);
-		const incorporated = incorporatedEvents(context.sessionManager.getEntries()).has(eventKey);
-		if (incorporated) pendingInsertions.delete(eventKey);
+		let incorporated = incorporatedEvents(context.sessionManager.getEntries()).has(eventKey);
 		if (!incorporated && isModelVisible(event.type)) {
-			if (!pendingInsertions.has(eventKey)) {
-				pi.sendMessage({
-					customType: TASK_EVENT_CUSTOM_TYPE,
-					content: renderTaskEvent(event),
-					display: true,
-					details: { taskId: event.taskId, eventId: event.eventId },
-				}, { triggerTurn: true, deliverAs: "followUp" });
-				pendingInsertions.add(eventKey);
-			}
-			if (!incorporatedEvents(context.sessionManager.getEntries()).has(eventKey)) return;
-			pendingInsertions.delete(eventKey);
+			if (!context.isIdle()) return;
+			pi.sendMessage({
+				customType: TASK_EVENT_CUSTOM_TYPE,
+				content: renderTaskEvent(event),
+				display: true,
+				details: eventDetails,
+			}, { triggerTurn: false });
+			incorporated = incorporatedEvents(context.sessionManager.getEntries()).has(eventKey);
+			if (!incorporated) return;
 		}
-		if (isModelVisible(event.type)) await core.recordInsertion({ taskId: event.taskId, eventId: event.eventId }, signal);
+		if (isModelVisible(event.type)) {
+			await core.recordInsertion(eventDetails, signal);
+			let wakeAccepted = taskMessageKeys(context.sessionManager.getEntries(), TASK_WAKE_CUSTOM_TYPE).has(eventKey);
+			if (!wakeAccepted) {
+				if (!context.isIdle()) return;
+				pi.sendMessage({
+					customType: TASK_WAKE_CUSTOM_TYPE,
+					content: "Process the pending Pi task event.",
+					display: false,
+					details: eventDetails,
+				}, { triggerTurn: true, deliverAs: "followUp" });
+				wakeAccepted = taskMessageKeys(context.sessionManager.getEntries(), TASK_WAKE_CUSTOM_TYPE).has(eventKey);
+				if (!wakeAccepted) return;
+			}
+		}
 		await core.acknowledgeRelayDelivery(delivery.cursor, signal);
 		pi.appendEntry(TASK_CURSOR_CUSTOM_TYPE, { cursor: delivery.cursor });
 	}
@@ -81,16 +98,24 @@ function renderTaskEvent(event: TaskEvent): string {
 }
 
 export function incorporatedTaskEvents(entries: readonly unknown[]): readonly TaskEventDetails[] {
+	return taskMessageDetails(entries, TASK_EVENT_CUSTOM_TYPE);
+}
+
+function taskMessageDetails(entries: readonly unknown[], customType: string): readonly TaskEventDetails[] {
 	const events: TaskEventDetails[] = [];
 	for (const entry of entries) {
-		if (!isRecord(entry) || entry.type !== "custom_message" || entry.customType !== TASK_EVENT_CUSTOM_TYPE || !isRecord(entry.details) || typeof entry.details.taskId !== "string" || typeof entry.details.eventId !== "string") continue;
+		if (!isRecord(entry) || entry.type !== "custom_message" || entry.customType !== customType || !isRecord(entry.details) || typeof entry.details.taskId !== "string" || typeof entry.details.eventId !== "string") continue;
 		events.push({ taskId: entry.details.taskId, eventId: entry.details.eventId });
 	}
 	return events;
 }
 
+function taskMessageKeys(entries: readonly unknown[], customType: string): Set<string> {
+	return new Set(taskMessageDetails(entries, customType).map((event) => key(event.taskId, event.eventId)));
+}
+
 function incorporatedEvents(entries: readonly unknown[]): Set<string> {
-	return new Set(incorporatedTaskEvents(entries).map((event) => key(event.taskId, event.eventId)));
+	return taskMessageKeys(entries, TASK_EVENT_CUSTOM_TYPE);
 }
 
 function isTaskEvent(value: unknown): value is TaskEvent {

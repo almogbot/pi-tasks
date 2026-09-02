@@ -64,7 +64,6 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	let inboxContext: ExtensionContext | undefined;
 	let backgroundTimer: ReturnType<typeof setInterval> | undefined;
 	let lifecycleEpoch = 0;
-	const pendingInsertions = new Set<string>();
 	const closingTaskIds = new Set<string>();
 	const workerGateEnabled = process.env.PI_TASK_WORKER === "1";
 	const configuredCore: ConfiguredCoreFactory = core === undefined ? createConfiguredCoreLoader(createCore) : async (): Promise<TaskCore> => core;
@@ -104,9 +103,10 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 			sendMessage(message, options) { if (isCurrent()) pi.sendMessage(message, options); },
 			appendEntry(customType, data) { if (isCurrent()) pi.appendEntry(customType, data); },
 		}, guardedCore, {
+			isIdle: (): boolean => isCurrent() && context.isIdle(),
 			hasPendingMessages: (): boolean => !isCurrent() || context.hasPendingMessages(),
 			sessionManager: context.sessionManager,
-		}, pendingInsertions, signal);
+		}, signal);
 		return outboxError;
 	});
 	const refreshLifecycle = async (context: ExtensionContext, epoch: number): Promise<void> => {
@@ -157,7 +157,6 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 
 	pi.on("session_start", async (_event, context) => {
-		pendingInsertions.clear();
 		closingTaskIds.clear();
 		const epoch = ++lifecycleEpoch;
 		inboxContext = context;
@@ -173,8 +172,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		inboxContext = context;
 		await refreshLifecycle(context, epoch);
 	});
+	pi.on("agent_settled", async (_event, context) => {
+		const epoch = lifecycleEpoch;
+		inboxContext = context;
+		await refreshLifecycle(context, epoch);
+	});
 	pi.on("session_shutdown", () => {
-		pendingInsertions.clear();
 		closingTaskIds.clear();
 		lifecycleEpoch += 1;
 		if (backgroundTimer) clearInterval(backgroundTimer);
@@ -196,8 +199,9 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		name: "agent_task_status", label: "Task Status", description: "Read local endpoint-owned task state; status is unavailable while its origin is offline.", parameters: TaskIdParams,
 		async execute(_id, params, signal) {
 			try {
-				const task = (await configuredCore(signal)).getTask(params.taskId);
-				return task ? toolResult(task, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}`) : taskError(new Error("unknown local task"));
+				const activeCore = await configuredCore(signal);
+				const task = activeCore.getTask(params.taskId);
+				return task ? toolResult(task, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}${receiverAssignment(activeCore, task)}`) : taskError(new Error("unknown local task"));
 			} catch (error) { return taskError(error); }
 		}, renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
@@ -223,8 +227,9 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		async execute(_id, _params, signal) {
 			try {
 				await refreshInbox(signal);
-				const tasks = (await configuredCore(signal)).listTasks();
-				return toolResult({ tasks }, `## task inbox\n${tasks.map((task) => `- \`${task.taskId}\`: ${task.status}`).join("\n") || "- empty"}`);
+				const activeCore = await configuredCore(signal);
+				const tasks = activeCore.listTasks();
+				return toolResult({ tasks }, `## task inbox\n${tasks.map((task) => `- \`${task.taskId}\`: ${task.status}${receiverAssignment(activeCore, task)}`).join("\n") || "- empty"}`);
 			} catch (error) { return taskError(error); }
 		},
 		renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
@@ -346,6 +351,11 @@ function outboxFailureStatus(error: unknown): "tasks: relay unavailable" | "task
 
 function terminal(status: string): boolean {
 	return ["completed", "failed", "cancelled", "timed_out"].includes(status);
+}
+
+function receiverAssignment(core: TaskCore, task: TaskSnapshot): string {
+	if (task.status !== "active" || sameEndpoint(task.origin, core.endpoint) || !sameEndpoint(task.target, core.endpoint)) return "";
+	return `\n\n## task assignment\n${task.task}`;
 }
 
 function assignedWorkerTasks(core: TaskCore, entries: readonly unknown[]): readonly TaskSnapshot[] {

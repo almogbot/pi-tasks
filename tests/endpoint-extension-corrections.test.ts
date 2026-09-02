@@ -422,20 +422,22 @@ test("continues autonomous polling after Pi replaces the extension context at ag
 	}
 });
 
-test("reserves an accepted insertion across live-session polls and retries it in the next session", async () => {
+test("keeps missing idle insertion evidence unacknowledged and retryable after pending delivery clears", async () => {
 	let sessionStart: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
-	let agentEnd: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
+	let agentSettled: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
 	let sessionShutdown: (() => void) | undefined;
-	let deliveries = 0;
+	let pending = true;
+	let insertionAttempts = 0;
 	let recordedInsertions = 0;
 	let acknowledgements = 0;
+	let wakes = 0;
 	const source = { relay: "memory", id: "parent" };
 	const target = { relay: "memory", id: "receiver" };
 	const delivery = {
 		cursor: "1",
 		envelope: {
 			envelopeId: "event-envelope", protocolVersion: TASK_PROTOCOL_VERSION, source, target, taskId: "task-1", kind: TaskEnvelopeKind.canonicalEvent,
-			payload: JSON.stringify({ eventId: "event-1", taskId: "task-1", type: "task.information", sequence: "1", source, target, occurredAt: 1, payload: { message: "pending persistence" } }),
+			payload: JSON.stringify({ eventId: "event-1", taskId: "task-1", type: "task.created", sequence: "1", source, target, occurredAt: 1, payload: { task: "pending persistence" } }),
 		},
 	} as const;
 	const core = {
@@ -446,39 +448,105 @@ test("reserves an accepted insertion across live-session polls and retries it in
 		async recordInsertion(): Promise<void> { recordedInsertions += 1; },
 		async acknowledgeRelayDelivery(): Promise<void> { acknowledgements += 1; },
 	} as unknown as TaskCore;
-	const context = (entries: readonly unknown[]) => ({
-		hasPendingMessages: (): boolean => false,
-		sessionManager: { getEntries: (): readonly unknown[] => entries },
+	const context = {
+		isIdle: (): boolean => true,
+		hasPendingMessages: (): boolean => pending,
+		sessionManager: { getEntries: (): readonly unknown[] => [] },
 		ui: { setStatus: (): void => undefined, theme: { fg: (_color: string, text: string): string => text } },
-	});
+	};
 	registerAgentTaskTools({
 		on(event: string, handler: unknown): void {
 			if (event === "session_start") sessionStart = handler as (event: unknown, context: unknown) => Promise<unknown>;
-			if (event === "agent_end") agentEnd = handler as (event: unknown, context: unknown) => Promise<unknown>;
+			if (event === "agent_settled") agentSettled = handler as (event: unknown, context: unknown) => Promise<unknown>;
 			if (event === "session_shutdown") sessionShutdown = handler as () => void;
 		},
 		registerTool(): void { undefined; },
-		sendMessage(): void { deliveries += 1; },
+		sendMessage(message: { readonly customType: string }): void {
+			if (message.customType === "pi-tasks-event") insertionAttempts += 1;
+			if (message.customType === "pi-tasks-wake") wakes += 1;
+		},
 	} as unknown as ExtensionAPI, core);
 
 	try {
-		const firstSessionEntries: unknown[] = [];
-		const firstSession = context(firstSessionEntries);
-		await sessionStart!({}, firstSession);
-		await agentEnd!({}, firstSession);
-		expect(deliveries).toBe(1);
+		await sessionStart!({}, context);
+		expect(insertionAttempts).toBe(0);
+
+		pending = false;
+		await agentSettled!({}, context);
+		await agentSettled!({}, context);
+		expect(insertionAttempts).toBe(2);
 		expect(recordedInsertions).toBe(0);
 		expect(acknowledgements).toBe(0);
+		expect(wakes).toBe(0);
+	} finally {
+		sessionShutdown?.();
+	}
+});
 
-		const secondSessionEntries: unknown[] = [];
-		const secondSession = context(secondSessionEntries);
-		await sessionStart!({}, secondSession);
-		expect(deliveries).toBe(2);
-		expect(recordedInsertions).toBe(0);
+test("persists an idle task event before sending one separate wake", async () => {
+	let sessionStart: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
+	let agentSettled: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
+	let sessionShutdown: (() => void) | undefined;
+	let idle = false;
+	let acknowledgements = 0;
+	let recordedInsertions = 0;
+	const entries: unknown[] = [];
+	const sent: Array<{ readonly customType: string; readonly triggerTurn: boolean | undefined }> = [];
+	const source = { relay: "memory", id: "parent" };
+	const target = { relay: "memory", id: "receiver" };
+	const delivery = {
+		cursor: "1",
+		envelope: {
+			envelopeId: "assignment-envelope", protocolVersion: TASK_PROTOCOL_VERSION, source, target, taskId: "task-1", kind: TaskEnvelopeKind.canonicalEvent,
+			payload: JSON.stringify({ eventId: "event-1", taskId: "task-1", type: "task.created", sequence: "1", source, target, occurredAt: 1, payload: { task: "implement safely" } }),
+		},
+	} as const;
+	const core = {
+		async connect(): Promise<void> { undefined; },
+		async flushOutbox(): Promise<void> { undefined; },
+		async evaluateTimeouts(): Promise<void> { undefined; },
+		async receive() { return acknowledgements === 0 ? [delivery] : []; },
+		async recordInsertion(): Promise<void> { recordedInsertions = 1; },
+		async acknowledgeRelayDelivery(): Promise<void> { acknowledgements += 1; },
+	} as unknown as TaskCore;
+	const context = {
+		isIdle: (): boolean => idle,
+		hasPendingMessages: (): boolean => false,
+		sessionManager: { getEntries: (): readonly unknown[] => entries },
+		ui: { setStatus: (): void => undefined, theme: { fg: (_color: string, text: string): string => text } },
+	};
+	registerAgentTaskTools({
+		on(event: string, handler: unknown): void {
+			if (event === "session_start") sessionStart = handler as (event: unknown, context: unknown) => Promise<unknown>;
+			if (event === "agent_settled") agentSettled = handler as (event: unknown, context: unknown) => Promise<unknown>;
+			if (event === "session_shutdown") sessionShutdown = handler as () => void;
+		},
+		registerTool(): void { undefined; },
+		sendMessage(message: { readonly customType: string; readonly details?: unknown }, options?: { readonly triggerTurn?: boolean }): void {
+			sent.push({ customType: message.customType, triggerTurn: options?.triggerTurn });
+			if (message.customType === "pi-tasks-event") entries.push({ type: "custom_message", customType: message.customType, details: message.details });
+		},
+		appendEntry(customType: string, data: unknown): void { entries.push({ type: "custom", customType, data }); },
+	} as unknown as ExtensionAPI, core);
+
+	try {
+		await sessionStart!({}, context);
+		expect(sent).toEqual([]);
 		expect(acknowledgements).toBe(0);
 
-		secondSessionEntries.push({ type: "custom_message", customType: "pi-tasks-event", details: { taskId: "task-1", eventId: "event-1" } });
-		await agentEnd!({}, secondSession);
+		idle = true;
+		await agentSettled!({}, context);
+		expect(sent).toEqual([
+			{ customType: "pi-tasks-event", triggerTurn: false },
+			{ customType: "pi-tasks-wake", triggerTurn: true },
+		]);
+		expect(entries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-event")).toHaveLength(1);
+		expect(recordedInsertions).toBe(1);
+		expect(acknowledgements).toBe(0);
+
+		entries.push({ type: "custom_message", customType: "pi-tasks-wake", details: { taskId: "task-1", eventId: "event-1" } });
+		await agentSettled!({}, context);
+		expect(sent).toHaveLength(2);
 		expect(recordedInsertions).toBe(1);
 		expect(acknowledgements).toBe(1);
 	} finally {
