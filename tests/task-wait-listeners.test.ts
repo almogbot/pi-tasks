@@ -4,8 +4,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAgentTaskTools as registerV2Tools } from "../src/extension";
 import type { TaskCore } from "../src/task-core";
 import type { TaskSnapshot } from "../src/task-protocol";
-import { registerAgentTaskTools as registerV1Tools } from "../src/legacy-extension";
-import type { TaskStatus, WolfpackGatewayClient } from "../src/gateway-client";
 
 interface WaitTool {
 	execute(
@@ -52,31 +50,6 @@ describe("task wait abort listeners", () => {
 		expect(cancelledSignal.listenerCount()).toBe(0);
 	});
 
-	test("v1 removes listeners after repeated polling and cancellation", async () => {
-		let statusChecks = 0;
-		const completedSignal = trackAbortListeners();
-		const completedWait = v1WaitTool({
-			status: async () => v1Task(++statusChecks >= 3 ? "completed" : "active"),
-		} as unknown as WolfpackGatewayClient);
-
-		const completed = await completedWait.execute("call", { taskId: "task-1", timeoutMs: 5_000 }, completedSignal.signal, undefined, {});
-
-		expect(completed.details).toMatchObject({ task: { taskId: "task-1" }, status: "completed" });
-		expect(completedSignal.additions()).toBe(2);
-		expect(completedSignal.removals()).toBe(2);
-		expect(completedSignal.listenerCount()).toBe(0);
-
-		const cancelledSignal = trackAbortListeners();
-		const cancelledWait = v1WaitTool({ status: async () => v1Task("active") } as unknown as WolfpackGatewayClient);
-		setTimeout(() => cancelledSignal.controller.abort(), 10);
-
-		const cancelled = await cancelledWait.execute("call", { taskId: "task-1", timeoutMs: 5_000 }, cancelledSignal.signal, undefined, {});
-
-		expect(cancelled.details).toEqual({ error: { code: "ABORTED", message: "task wait was cancelled", retryable: true } });
-		expect(cancelledSignal.additions()).toBe(1);
-		expect(cancelledSignal.removals()).toBe(1);
-		expect(cancelledSignal.listenerCount()).toBe(0);
-	});
 });
 
 function v2WaitTool(core: TaskCore): WaitTool {
@@ -85,15 +58,6 @@ function v2WaitTool(core: TaskCore): WaitTool {
 		on: () => undefined,
 		registerTool(tool: unknown) { const registered = tool as WaitTool & { readonly name: string }; tools[registered.name] = registered; },
 	} as unknown as ExtensionAPI, core);
-	return tools.agent_task_wait!;
-}
-
-function v1WaitTool(client: WolfpackGatewayClient): WaitTool {
-	const tools: Record<string, WaitTool> = {};
-	registerV1Tools({
-		on: () => undefined,
-		registerTool(tool: unknown) { const registered = tool as WaitTool & { readonly name: string }; tools[registered.name] = registered; },
-	} as unknown as ExtensionAPI, client);
 	return tools.agent_task_wait!;
 }
 
@@ -137,22 +101,5 @@ function v2Task(status: TaskSnapshot["status"]): TaskSnapshot {
 		status,
 		events: [],
 		terminalDelivery: { state: "not_submitted" },
-	};
-}
-
-function v1Task(status: string): TaskStatus {
-	const address = { machine: "local", sessionId: "parent" };
-	return {
-		task: {
-			taskId: "task-1",
-			source: address,
-			target: address,
-			task: "wait",
-			createdAt: "2026-08-03T00:00:00.000Z",
-			expiresAt: "2026-08-03T01:00:00.000Z",
-		},
-		status,
-		events: [],
-		warnings: [],
 	};
 }

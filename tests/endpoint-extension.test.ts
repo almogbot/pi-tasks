@@ -399,7 +399,6 @@ test("publishes the supported core and relay contract independently from the Pi 
 		Bun.file(new URL("../src/extension.ts", import.meta.url)).text(),
 		Bun.file(new URL("../package.json", import.meta.url)).json() as Promise<{ readonly module: string }>,
 	]);
-	expect(source).not.toContain("gateway-client");
 	expect(source).not.toContain("core: TaskCore = createInMemoryExtensionCore()");
 	expect(packageJson.module).toBe("src/index.ts");
 });
