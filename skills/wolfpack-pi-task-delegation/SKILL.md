@@ -7,6 +7,15 @@ description: Use when opening, selecting, delegating to, checking, or cleaning u
 
 use `wolfpack-tailnet-control` for session control. this skill covers endpoint-owned v2 task lifecycle, structured handoffs, and parent verification. The package default is the v2 extension described by Wolfpack's [relay v2 control-api contract](https://github.com/almogdepaz/wolfpack/blob/main/docs/control-api-schema.md#pi-tasks-relay-v2-boundary).
 
+## choose one assignment mode
+
+choose exactly one mode for the initial assignment:
+
+- **full-startup mode:** spawn with the complete `--plan`, `--prompt-file`, or concise `--prompt`. do not call `agent_task_send` for that same work.
+- **endpoint mode:** spawn without a startup plan or prompt, obtain the structured `taskEndpoint`, then put the complete assignment in one `agent_task_send.task`.
+
+never combine a plan-driven spawn with a narrower endpoint task. prefer one cohesive implementation handoff per approved PR or phase; split only at a real approval, design, isolation, or blocker boundary—not per issue, commit, finding, or verification checkpoint. the remaining v2 workflow below describes endpoint mode.
+
 ## v2 requirements and addressing
 
 - load this package's default extension in every participating Pi process and set `WOLFPACK_SESSION_NAME`. Set `WOLFPACK_PORT` only when the local Wolfpack control port differs from `18790`.
@@ -18,16 +27,16 @@ use `wolfpack-tailnet-control` for session control. this skill covers endpoint-o
 ```json
 {
   "to": { "relay": "wolfpack-pi-tasks-v2", "id": "target-opaque-endpoint-id" },
-  "task": "implement the narrow change and run focused tests",
-  "timeoutMs": 1800000
+  "task": "implement the approved phase and run focused tests",
+  "timeoutMs": 3600000
 }
 ```
 
-The default `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. v1-only fields such as context, role, metadata, preflight, idempotency keys, and completion prompts are not silently accepted or translated.
+The default `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. v1-only fields such as context, role, metadata, preflight, idempotency keys, and completion prompts are not silently accepted or translated. use at least `3600000` milliseconds for coding assignments; timeout is a failure deadline, not a progress-poll interval.
 
 ## phase roles and handoffs
 
-For a multi-step project phase, retain one persistent implementer and one persistent read-only reviewer. Reuse a healthy role session for corrections and follow-up review; a completed task finishes one assignment, not the underlying session. Do not rotate a healthy role session for routine corrections. Rotate only for phase completion, material context degradation, harness failure, or required specialist independence. Keep at most one active assignment per role unless the user explicitly approves parallel work.
+For a multi-step project phase, retain one persistent implementer and one persistent read-only reviewer. Give the implementer the whole approved phase, including required commit ordering and focused verification, rather than opening one task per issue or checkpoint. Reuse a healthy role session for corrections and follow-up review; a completed task finishes one assignment, not the underlying session. Do not rotate a healthy role session for routine corrections. Rotate only for phase completion, material context degradation, harness failure, or required specialist independence. Keep at most one active assignment per role unless the user explicitly approves parallel work.
 
 `PI_TASK_WORKER=1` sessions are leaf roles. Workers cannot call `agent_task_send`; workers cannot call `agent_task_cancel`; workers cannot call `agent_task_ack`. These coordinator-tool attempts are blocked with the stable reason `PI_TASK_WORKER_COORDINATION_FORBIDDEN`, not the pre-assignment reason. They may use `agent_task_message` only for the eligible incorporated assignment named by its input `taskId`. Generic role-orchestration guidance applies only to non-worker coordinators. Task workers must not create, rotate, or close Wolfpack sessions through shell or session-control tools.
 
@@ -50,7 +59,7 @@ Assignment completion ends the assigned task, not the reusable role session. Whe
 
 1. create or select the role session, verify its structured project and terminal readiness, then obtain its registered `taskEndpoint`.
 2. call `agent_task_send` with the opaque endpoint and concise instructions in `task`. The tool returns after relay acceptance only, not Pi insertion or model execution. If submission reports a retryable delivery error after local persistence, use the structured task ID from the error and inspect it rather than creating an unrelated replacement.
-3. keep working. Use `agent_task_status` or `agent_task_inbox` for structured evidence. Call `agent_task_wait` only when the user explicitly asks to block.
+3. keep working. Use `agent_task_status` or `agent_task_inbox` only at meaningful checkpoints or when progress evidence is needed; do not turn status checks into lifecycle chatter. Call `agent_task_wait` only when the user explicitly asks to block.
 4. use `agent_task_message` for durable `question`, `answer`, or `information` flow. Do not use rendered text, terminal output, or logs as lifecycle evidence.
 5. assignees call `agent_task_done` as their final action with the assigned task ID, terminal status, concise summary, and optional structured result, error, and artifact declarations. Report source modifications in `result.changedFiles`; artifacts are receiver-project-relative regular files for a parent to inspect, not changed-file lists: `{ "result": { "changedFiles": ["src/extension.ts"] }, "artifacts": [{ "path": "verification/task-2.md" }] }`. No prose completion afterward.
 6. the parent independently verifies files, diff, tests, and artifacts. Then call `agent_task_ack({ taskId })` for that one terminal task and explicitly retain or close the spawned role session.
