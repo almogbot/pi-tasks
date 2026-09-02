@@ -133,12 +133,15 @@ test("done tool reports an origin-owned late terminal as a canonical event", asy
 	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
 	const signal = new AbortController().signal;
 	await tools.agent_task_done!.execute("call-1", { taskId: created.taskId, status: "completed", summary: "finished" }, signal, undefined, {});
+	await tools.agent_task_done!.execute("call-2", { taskId: created.taskId, status: "cancelled", summary: "late cancellation" }, signal, undefined, {});
+	await origin.submitIntent({ taskId: created.taskId, type: "task.information", payload: { message: "later event" } });
+	expect(origin.getTask(created.taskId)?.events.at(-1)?.type).toBe("task.information");
 
-	const result = await tools.agent_task_done!.execute("call-2", { taskId: created.taskId, status: "failed", summary: "late failure" }, signal, undefined, {});
+	const result = await tools.agent_task_done!.execute("call-3", { taskId: created.taskId, status: "cancelled", summary: "retry late cancellation" }, signal, undefined, {});
 
 	expect(result.details).toEqual({
 		taskId: created.taskId,
-		requestedStatus: "failed",
+		requestedStatus: "cancelled",
 		observedCanonicalStatus: "completed",
 		canonicalEvent: { type: "task.late_terminal" },
 	});

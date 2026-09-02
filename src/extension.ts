@@ -266,6 +266,8 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		async execute(_id, params, signal) {
 			try {
 				const activeCore = await configuredCore(signal);
+				const priorTask = activeCore.getTask(params.taskId);
+				const originWasTerminal = priorTask !== undefined && sameEndpoint(priorTask.origin, activeCore.endpoint) && terminal(priorTask.status);
 				try {
 					await activeCore.submitIntent({ taskId: params.taskId, type: `task.${params.status}`, payload: { summary: params.summary, ...(params.result === undefined ? {} : { result: params.result }), ...(params.error === undefined ? {} : { error: params.error }), ...(params.artifacts === undefined ? {} : { artifacts: params.artifacts }) } }, signal);
 				} catch (error) {
@@ -273,15 +275,15 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 				}
 				const task = activeCore.getTask(params.taskId);
 				if (!task) return taskError(new Error("unknown local task"));
-				if (sameEndpoint(task.origin, activeCore.endpoint) && task.status === params.status) {
+				if (originWasTerminal) {
 					return {
-						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalCompletion: { state: "confirmed", status: task.status } }, `## task ${task.status}\n- task: \`${params.taskId}\`\n- canonical status: ${task.status}\n- ${params.summary}`),
+						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalEvent: { type: "task.late_terminal" } }, `## canonical late terminal recorded\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- canonical status remains: ${task.status}\n- ${params.summary}`),
 						terminate: true,
 					};
 				}
-				if (sameEndpoint(task.origin, activeCore.endpoint) && task.events.at(-1)?.type === "task.late_terminal") {
+				if (sameEndpoint(task.origin, activeCore.endpoint) && task.status === params.status) {
 					return {
-						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalEvent: { type: "task.late_terminal" } }, `## canonical late terminal recorded\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- canonical status remains: ${task.status}\n- ${params.summary}`),
+						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalCompletion: { state: "confirmed", status: task.status } }, `## task ${task.status}\n- task: \`${params.taskId}\`\n- canonical status: ${task.status}\n- ${params.summary}`),
 						terminate: true,
 					};
 				}
