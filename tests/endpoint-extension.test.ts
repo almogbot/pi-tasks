@@ -80,8 +80,8 @@ test("origin status reports structured receiver persistence and blocked Pi inser
 	const created = await origin.createTask({ target: receiver.endpoint, task: "report blocked insertion", timeoutMs: 1_000 });
 	await receiver.receive();
 	const createdEventId = receiver.getTask(created.taskId)?.events[0]?.eventId ?? "";
-	await receiver.recordDeliveryEvidence({ taskId: created.taskId, eventId: createdEventId, stage: "receiver_persisted", state: "confirmed" });
-	await receiver.recordDeliveryEvidence({ taskId: created.taskId, eventId: createdEventId, stage: "pi_insertion", state: "blocked", retryable: true });
+	await receiver.submitIntent({ taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: createdEventId, stage: "receiver_persisted", state: "confirmed" } });
+	await receiver.submitIntent({ taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: createdEventId, stage: "pi_insertion", state: "blocked", retryable: true } });
 	await origin.receive();
 	const tools: Record<string, Tool> = {};
 	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
@@ -118,6 +118,31 @@ test("done tool reports successful origin-owned completion as canonical rather t
 		canonicalCompletion: { state: "confirmed", status: "completed" },
 	});
 	expect(result.content[0]?.text).toContain("## task completed");
+	expect(result.content[0]?.text).not.toContain("terminal intent");
+	expect(result.terminate).toBe(true);
+});
+
+test("done tool reports an origin-owned late terminal as a canonical event", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "record late terminal", timeoutMs: 1_000 });
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+	const signal = new AbortController().signal;
+	await tools.agent_task_done!.execute("call-1", { taskId: created.taskId, status: "completed", summary: "finished" }, signal, undefined, {});
+
+	const result = await tools.agent_task_done!.execute("call-2", { taskId: created.taskId, status: "failed", summary: "late failure" }, signal, undefined, {});
+
+	expect(result.details).toEqual({
+		taskId: created.taskId,
+		requestedStatus: "failed",
+		observedCanonicalStatus: "completed",
+		canonicalEvent: { type: "task.late_terminal" },
+	});
+	expect(result.content[0]?.text).toContain("## canonical late terminal recorded");
 	expect(result.content[0]?.text).not.toContain("terminal intent");
 	expect(result.terminate).toBe(true);
 });

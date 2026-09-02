@@ -446,7 +446,7 @@ test("keeps missing idle insertion evidence unacknowledged and retryable after p
 		async flushOutbox(): Promise<void> { undefined; },
 		async evaluateTimeouts(): Promise<void> { undefined; },
 		async receive() { return [delivery]; },
-		async recordDeliveryEvidence(input: { readonly stage: string; readonly state: string }): Promise<void> { deliveryEvidence.add(`${input.stage}:${input.state}`); },
+		async submitIntent(input: { readonly payload: { readonly stage: string; readonly state: string } }): Promise<void> { deliveryEvidence.add(`${input.payload.stage}:${input.payload.state}`); },
 		async recordInsertion(): Promise<void> { recordedInsertions += 1; },
 		async acknowledgeRelayDelivery(): Promise<void> { acknowledgements += 1; },
 	} as unknown as TaskCore;
@@ -510,7 +510,7 @@ test("persists an idle task event before sending one separate wake", async () =>
 		async flushOutbox(): Promise<void> { undefined; },
 		async evaluateTimeouts(): Promise<void> { undefined; },
 		async receive() { return acknowledgements === 0 ? [delivery] : []; },
-		async recordDeliveryEvidence(input: { readonly stage: string; readonly state: string }): Promise<void> { deliveryEvidence.add(`${input.stage}:${input.state}`); },
+		async submitIntent(input: { readonly payload: { readonly stage: string; readonly state: string } }): Promise<void> { deliveryEvidence.add(`${input.payload.stage}:${input.payload.state}`); },
 		async recordInsertion(): Promise<void> { recordedInsertions = 1; },
 		async acknowledgeRelayDelivery(): Promise<void> { acknowledgements += 1; },
 	} as unknown as TaskCore;

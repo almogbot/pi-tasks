@@ -56,10 +56,6 @@ export interface SubmitIntentInput {
 	readonly payload: Record<string, unknown>;
 }
 
-export type RecordDeliveryEvidenceInput =
-	| { readonly taskId: string; readonly eventId: string; readonly stage: typeof TaskDeliveryStage.receiverPersisted | typeof TaskDeliveryStage.wakeRequested | typeof TaskDeliveryStage.wakeAccepted; readonly state: typeof TaskDeliveryEvidenceState.confirmed }
-	| { readonly taskId: string; readonly eventId: string; readonly stage: typeof TaskDeliveryStage.piInsertion; readonly state: typeof TaskDeliveryEvidenceState.blocked; readonly retryable: true };
-
 export interface TaskCore {
 	readonly endpoint: TaskEndpoint;
 	connect(signal?: AbortSignal): Promise<void>;
@@ -70,7 +66,6 @@ export interface TaskCore {
 	receive(signal?: AbortSignal): Promise<readonly RelayDelivery[]>;
 	acknowledgeRelayDelivery(cursor: string, signal?: AbortSignal): Promise<void>;
 	submitIntent(input: SubmitIntentInput, signal?: AbortSignal): Promise<void>;
-	recordDeliveryEvidence(input: RecordDeliveryEvidenceInput, signal?: AbortSignal): Promise<void>;
 	recordInsertion(input: { readonly taskId: string; readonly eventId: string }, signal?: AbortSignal): Promise<void>;
 	evaluateTimeouts(signal?: AbortSignal): Promise<void>;
 	acknowledgeParent(taskId: string, signal?: AbortSignal): Promise<void>;
@@ -151,42 +146,39 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 			let persistedEnvelopeIds: readonly string[] = [];
 			let receiverTerminal = false;
 			let originCancellation = false;
+			const evidence = deliveryEvidence(input);
 			options.store.transaction(() => {
 				const task = requiredTask(options.store, input.taskId);
 				receiverTerminal = !sameEndpoint(options.endpoint, task.origin) && TERMINAL_EVENTS.has(input.type);
 				originCancellation = sameEndpoint(options.endpoint, task.origin) && input.type === "task.cancelled";
-				persistedEnvelopeIds = persistIntent(options, clock.now, ids, task, input);
+				persistedEnvelopeIds = persistIntent(options, clock.now, ids, task, input, evidence === undefined ? undefined : deliveryEvidenceOperation(evidence));
 			});
-			try {
-				await flush(options, signal, new Set(persistedEnvelopeIds));
-			} catch (error) {
+			if (evidence !== undefined) {
+				await flushDeliveryEvidence(options, signal, input.taskId, persistedEnvelopeIds, evidence);
+			} else {
+				try {
+					await flush(options, signal, new Set(persistedEnvelopeIds));
+				} catch (error) {
+					if (originCancellation) throwIfCancellationDeliveryBlocked(options, input.taskId, persistedEnvelopeIds);
+					throw error;
+				}
 				if (originCancellation) throwIfCancellationDeliveryBlocked(options, input.taskId, persistedEnvelopeIds);
-				throw error;
 			}
-			if (originCancellation) throwIfCancellationDeliveryBlocked(options, input.taskId, persistedEnvelopeIds);
 			if (receiverTerminal) throwIfTerminalDeliveryBlocked(options.store, input.taskId);
-		},
-		async recordDeliveryEvidence(input, signal) {
-			const task = requiredTask(options.store, input.taskId);
-			let persistedEnvelopeIds: readonly string[] = [];
-			options.store.transaction(() => {
-				persistedEnvelopeIds = persistIntent(options, clock.now, ids, task, {
-					taskId: input.taskId,
-					type: "task.delivery_receipt",
-					payload: { eventId: input.eventId, stage: input.stage, state: input.state, ...("retryable" in input ? { retryable: input.retryable } : {}) },
-				}, deliveryEvidenceOperation(input));
-			});
-			if (persistedEnvelopeIds.length > 0) await flush(options, signal, new Set(persistedEnvelopeIds));
 		},
 		async recordInsertion(input, signal) {
 			const task = requiredTask(options.store, input.taskId);
+			const evidence: DeliveryEvidence = { eventId: input.eventId, stage: TaskDeliveryStage.piInserted, state: TaskDeliveryEvidenceState.confirmed };
 			let persistedEnvelopeIds: readonly string[] = [];
 			options.store.transaction(() => {
-				if (options.store.putInsertionReceipt(input.taskId, input.eventId)) {
-					persistedEnvelopeIds = persistIntent(options, clock.now, ids, task, { taskId: input.taskId, type: "task.delivery_receipt", payload: { eventId: input.eventId, stage: TaskDeliveryStage.piInserted, state: TaskDeliveryEvidenceState.confirmed } });
-				}
+				options.store.putInsertionReceipt(input.taskId, input.eventId);
+				persistedEnvelopeIds = persistIntent(options, clock.now, ids, task, {
+					taskId: input.taskId,
+					type: "task.delivery_receipt",
+					payload: { eventId: input.eventId, stage: evidence.stage, state: evidence.state },
+				}, deliveryEvidenceOperation(evidence));
 			});
-			if (persistedEnvelopeIds.length > 0) await flush(options, signal, new Set(persistedEnvelopeIds));
+			await flushDeliveryEvidence(options, signal, input.taskId, persistedEnvelopeIds, evidence);
 		},
 		async evaluateTimeouts(signal) {
 			const persistedEnvelopeIds: string[] = [];
@@ -300,7 +292,28 @@ function persistIntent(options: TaskCoreOptions, now: () => number, ids: () => s
 	return [envelopeId];
 }
 
-function deliveryEvidenceOperation(input: RecordDeliveryEvidenceInput): string {
+interface DeliveryEvidence {
+	readonly eventId: string;
+	readonly stage: TaskDeliveryStage;
+	readonly state: TaskDeliveryEvidenceState;
+	readonly retryable?: true;
+}
+
+function deliveryEvidence(input: SubmitIntentInput): DeliveryEvidence | undefined {
+	if (input.type !== "task.delivery_receipt" || typeof input.payload.eventId !== "string") return undefined;
+	const stage = input.payload.stage;
+	const state = input.payload.state;
+	if (stage === TaskDeliveryStage.piInsertion && state === TaskDeliveryEvidenceState.blocked && input.payload.retryable === true) {
+		return { eventId: input.payload.eventId, stage, state, retryable: true };
+	}
+	if ((stage === TaskDeliveryStage.receiverPersisted || stage === TaskDeliveryStage.piInserted || stage === TaskDeliveryStage.wakeRequested || stage === TaskDeliveryStage.wakeAccepted)
+		&& state === TaskDeliveryEvidenceState.confirmed) {
+		return { eventId: input.payload.eventId, stage, state };
+	}
+	return undefined;
+}
+
+function deliveryEvidenceOperation(input: DeliveryEvidence): string {
 	return `${DELIVERY_EVIDENCE_OPERATION}:${input.eventId}:${input.stage}:${input.state}`;
 }
 
@@ -321,6 +334,16 @@ function canonicalize(options: TaskCoreOptions, now: () => number, ids: () => st
 	options.store.putOutbox(targetEnvelope);
 	if (originEnvelope !== undefined) options.store.putOutbox(originEnvelope);
 	return persistedEnvelopeIds;
+}
+
+async function flushDeliveryEvidence(options: TaskCoreOptions, signal: AbortSignal | undefined, taskId: string, envelopeIds: readonly string[], evidence: DeliveryEvidence): Promise<void> {
+	try {
+		if (envelopeIds.length > 0) await flush(options, signal, new Set(envelopeIds));
+	} catch (error) {
+		throwIfDeliveryEvidenceBlocked(options.store, taskId, envelopeIds, evidence);
+		throw error;
+	}
+	throwIfDeliveryEvidenceBlocked(options.store, taskId, envelopeIds, evidence);
 }
 
 async function flush(options: TaskCoreOptions, signal: AbortSignal | undefined, reportedEnvelopeIds?: ReadonlySet<string>): Promise<void> {
@@ -381,6 +404,24 @@ function throwIfCancellationDeliveryBlocked(options: TaskCoreOptions, taskId: st
 	throw new TaskOutboxDeliveryError(blocked.errorCode, blocked.reason, {
 		retryable: false,
 		details: { ...blocked.details, taskId, envelopeId: blocked.envelope.envelopeId, target: task.target, blockedAt: blocked.quarantinedAt },
+	});
+}
+
+function throwIfDeliveryEvidenceBlocked(store: TaskStore, taskId: string, envelopeIds: readonly string[], evidence: DeliveryEvidence): void {
+	const blocked = store.quarantinedOutbox().find((record) => envelopeIds.includes(record.envelope.envelopeId));
+	if (blocked === undefined) return;
+	throw new TaskOutboxDeliveryError(blocked.errorCode, "task delivery evidence is blocked", {
+		retryable: false,
+		details: {
+			...blocked.details,
+			taskId,
+			eventId: evidence.eventId,
+			stage: evidence.stage,
+			state: evidence.state,
+			envelopeId: blocked.envelope.envelopeId,
+			target: blocked.envelope.target,
+			blockedAt: blocked.quarantinedAt,
+		},
 	});
 }
 

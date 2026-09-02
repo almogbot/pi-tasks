@@ -279,6 +279,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 						terminate: true,
 					};
 				}
+				if (sameEndpoint(task.origin, activeCore.endpoint) && task.events.at(-1)?.type === "task.late_terminal") {
+					return {
+						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalEvent: { type: "task.late_terminal" } }, `## canonical late terminal recorded\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- canonical status remains: ${task.status}\n- ${params.summary}`),
+						terminate: true,
+					};
+				}
 				const deliveryOutcome = task.terminalDelivery.state === "accepted" ? "accepted" : "recorded";
 				const result = toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, terminalDelivery: task.terminalDelivery }, `## terminal intent ${deliveryOutcome}\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- observed canonical status: ${task.status}\n- ${params.summary}`);
 				return task.terminalDelivery.state === "accepted" || terminal(task.status) ? { ...result, terminate: true } : result;

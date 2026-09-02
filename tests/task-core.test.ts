@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
 import { createTaskCore } from "../src/task-core";
 import { createTaskStore } from "../src/task-store";
-import type { TaskEndpoint } from "../src/task-protocol";
+import { TaskProtocolError } from "../src/task-protocol";
+import type { TaskEndpoint, TaskRelay } from "../src/task-protocol";
 
 const ORIGIN: TaskEndpoint = { relay: "memory", id: "origin" };
 const RECEIVER: TaskEndpoint = { relay: "memory", id: "receiver" };
@@ -31,6 +34,22 @@ function fixture(now = 1_000): Fixture {
 function sequenceIds(prefix: string): () => string {
 	let next = 0;
 	return (): string => `${prefix}-${++next}`;
+}
+
+function blockOriginDelivery(backing: ReturnType<typeof createInMemoryTaskRelay>, blocked: { readonly value: boolean }): TaskRelay {
+	return {
+		id: backing.id,
+		connect: (input) => backing.connect(input),
+		resolve: (input) => backing.resolve(input),
+		send: async (input) => {
+			if (blocked.value && input.target.id === ORIGIN.id) {
+				throw new TaskProtocolError("TARGET_NOT_REGISTERED", "target is inactive", { retryable: false, details: { targetId: input.target.id } });
+			}
+			return backing.send(input);
+		},
+		receive: (input) => backing.receive(input),
+		acknowledgeDelivery: (input) => backing.acknowledgeDelivery(input),
+	};
 }
 
 afterEach(() => undefined);
@@ -92,6 +111,69 @@ describe("endpoint-owned task core", () => {
 		await value.receiver.flushOutbox();
 		expect(value.receiverStore.outbox("pending")).toHaveLength(0);
 		expect(value.relay.envelopesFor(ORIGIN)[0]?.envelopeId).toBe(envelopeId);
+	});
+
+	test("keeps quarantined delivery evidence blocked with its stable identity after restart", async () => {
+		const directory = mkdtempSync("/tmp/pi-task-evidence-quarantine-");
+		const path = join(directory, "receiver.sqlite");
+		const backing = createInMemoryTaskRelay("memory");
+		const blocked = { value: false };
+		const relay = blockOriginDelivery(backing, blocked);
+		let receiverStore = createTaskStore({ path });
+		const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequenceIds("origin") });
+		let receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequenceIds("receiver") });
+		try {
+			await origin.connect();
+			await receiver.connect();
+			const created = await origin.createTask({ target: RECEIVER, task: "implement narrowly", timeoutMs: 500 });
+			await receiver.receive();
+			blocked.value = true;
+			const evidence = { taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: "origin-2", stage: "receiver_persisted", state: "confirmed" } } as const;
+
+			await expect(receiver.submitIntent(evidence)).rejects.toMatchObject({ code: "TARGET_NOT_REGISTERED", retryable: false });
+			const quarantinedEnvelopeId = receiverStore.quarantinedOutbox()[0]?.envelope.envelopeId;
+			if (quarantinedEnvelopeId === undefined) throw new Error("delivery evidence was not quarantined");
+			receiverStore.close();
+			receiverStore = createTaskStore({ path });
+			receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequenceIds("resumed-receiver") });
+			await receiver.connect();
+
+			await expect(receiver.submitIntent(evidence)).rejects.toMatchObject({
+				code: "TARGET_NOT_REGISTERED",
+				retryable: false,
+				details: expect.objectContaining({ taskId: created.taskId, eventId: "origin-2", stage: "receiver_persisted", state: "confirmed" }),
+			});
+			expect(receiverStore.quarantinedOutbox().map((record) => record.envelope.envelopeId)).toEqual([quarantinedEnvelopeId]);
+			expect(backing.envelopesFor(ORIGIN)).toEqual([]);
+		} finally {
+			receiverStore.close();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps a quarantined Pi insertion receipt blocked on retry", async () => {
+		const backing = createInMemoryTaskRelay("memory");
+		const blocked = { value: false };
+		const relay = blockOriginDelivery(backing, blocked);
+		const receiverStore = createTaskStore({ path: ":memory:" });
+		const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequenceIds("origin") });
+		const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequenceIds("receiver") });
+		await origin.connect();
+		await receiver.connect();
+		const created = await origin.createTask({ target: RECEIVER, task: "implement narrowly", timeoutMs: 500 });
+		await receiver.receive();
+		blocked.value = true;
+		const insertion = { taskId: created.taskId, eventId: "origin-2" };
+
+		await expect(receiver.recordInsertion(insertion)).rejects.toMatchObject({ code: "TARGET_NOT_REGISTERED", retryable: false });
+		const quarantinedEnvelopeId = receiverStore.quarantinedOutbox()[0]?.envelope.envelopeId;
+		if (quarantinedEnvelopeId === undefined) throw new Error("Pi insertion receipt was not quarantined");
+		await expect(receiver.recordInsertion(insertion)).rejects.toMatchObject({
+			code: "TARGET_NOT_REGISTERED",
+			retryable: false,
+			details: expect.objectContaining({ taskId: created.taskId, eventId: "origin-2", stage: "pi_inserted", state: "confirmed" }),
+		});
+		expect(receiverStore.quarantinedOutbox().map((record) => record.envelope.envelopeId)).toEqual([quarantinedEnvelopeId]);
 	});
 
 	test("records one insertion receipt when the same Pi insertion is retried", async () => {

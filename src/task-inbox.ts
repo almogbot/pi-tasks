@@ -25,6 +25,10 @@ export interface TaskEventDetails {
 	readonly eventId: string;
 }
 
+type DeliveryEvidencePayload =
+	| { readonly stage: typeof TaskDeliveryStage.receiverPersisted | typeof TaskDeliveryStage.wakeRequested | typeof TaskDeliveryStage.wakeAccepted; readonly state: typeof TaskDeliveryEvidenceState.confirmed }
+	| { readonly stage: typeof TaskDeliveryStage.piInsertion; readonly state: typeof TaskDeliveryEvidenceState.blocked; readonly retryable: true };
+
 /** Persists model-visible Pi evidence before advancing the relay cursor, then starts one separate turn. */
 export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: InboxContext, signal?: AbortSignal): Promise<void> {
 	if (context.hasPendingMessages()) return;
@@ -41,7 +45,7 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 		const eventDetails = { taskId: event.taskId, eventId: event.eventId };
 		const eventKey = key(event.taskId, event.eventId);
 		if (event.type === "task.created") {
-			await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.receiverPersisted, state: TaskDeliveryEvidenceState.confirmed }, signal);
+			await recordDeliveryEvidence(core, eventDetails, { stage: TaskDeliveryStage.receiverPersisted, state: TaskDeliveryEvidenceState.confirmed }, signal);
 		}
 		let incorporated = incorporatedEvents(context.sessionManager.getEntries()).has(eventKey);
 		if (!incorporated && isModelVisible(event.type)) {
@@ -54,7 +58,7 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 			}, { triggerTurn: false });
 			incorporated = incorporatedEvents(context.sessionManager.getEntries()).has(eventKey);
 			if (!incorporated) {
-				await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.piInsertion, state: TaskDeliveryEvidenceState.blocked, retryable: true }, signal);
+				await recordDeliveryEvidence(core, eventDetails, { stage: TaskDeliveryStage.piInsertion, state: TaskDeliveryEvidenceState.blocked, retryable: true }, signal);
 				return;
 			}
 		}
@@ -63,7 +67,7 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 			let wakeAccepted = taskMessageKeys(context.sessionManager.getEntries(), TASK_WAKE_CUSTOM_TYPE).has(eventKey);
 			if (!wakeAccepted) {
 				if (!context.isIdle()) return;
-				await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.wakeRequested, state: TaskDeliveryEvidenceState.confirmed }, signal);
+				await recordDeliveryEvidence(core, eventDetails, { stage: TaskDeliveryStage.wakeRequested, state: TaskDeliveryEvidenceState.confirmed }, signal);
 				pi.sendMessage({
 					customType: TASK_WAKE_CUSTOM_TYPE,
 					content: "Process the pending Pi task event.",
@@ -73,11 +77,15 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 				wakeAccepted = taskMessageKeys(context.sessionManager.getEntries(), TASK_WAKE_CUSTOM_TYPE).has(eventKey);
 				if (!wakeAccepted) return;
 			}
-			await core.recordDeliveryEvidence({ ...eventDetails, stage: TaskDeliveryStage.wakeAccepted, state: TaskDeliveryEvidenceState.confirmed }, signal);
+			await recordDeliveryEvidence(core, eventDetails, { stage: TaskDeliveryStage.wakeAccepted, state: TaskDeliveryEvidenceState.confirmed }, signal);
 		}
 		await core.acknowledgeRelayDelivery(delivery.cursor, signal);
 		pi.appendEntry(TASK_CURSOR_CUSTOM_TYPE, { cursor: delivery.cursor });
 	}
+}
+
+async function recordDeliveryEvidence(core: TaskCore, event: TaskEventDetails, evidence: DeliveryEvidencePayload, signal?: AbortSignal): Promise<void> {
+	await core.submitIntent({ taskId: event.taskId, type: "task.delivery_receipt", payload: { eventId: event.eventId, ...evidence } }, signal);
 }
 
 function inboxEvent(delivery: RelayDelivery): TaskEvent {
