@@ -122,6 +122,30 @@ test("done tool reports successful origin-owned completion as canonical rather t
 	expect(result.terminate).toBe(true);
 });
 
+test("done tool keeps a reused canonical origin cancellation distinct from a late terminal", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	await origin.connect();
+	await receiver.connect();
+	const created = await origin.createTask({ target: receiver.endpoint, task: "retry canonical cancellation", timeoutMs: 1_000 });
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, origin);
+	const signal = new AbortController().signal;
+	await tools.agent_task_done!.execute("call-1", { taskId: created.taskId, status: "cancelled", summary: "cancel" }, signal, undefined, {});
+
+	const retry = await tools.agent_task_done!.execute("call-2", { taskId: created.taskId, status: "cancelled", summary: "retry cancel" }, signal, undefined, {});
+
+	expect(retry.details).toEqual({
+		taskId: created.taskId,
+		requestedStatus: "cancelled",
+		observedCanonicalStatus: "cancelled",
+		canonicalCompletion: { state: "confirmed", status: "cancelled" },
+	});
+	expect(retry.content[0]?.text).toContain("## task cancelled");
+	expect(origin.getTask(created.taskId)?.events.map((event) => event.type)).toEqual(["task.created", "task.cancelled"]);
+});
+
 test("done tool reports an origin-owned late terminal as a canonical event", async () => {
 	const relay = createInMemoryTaskRelay("memory");
 	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
@@ -143,7 +167,7 @@ test("done tool reports an origin-owned late terminal as a canonical event", asy
 		taskId: created.taskId,
 		requestedStatus: "cancelled",
 		observedCanonicalStatus: "completed",
-		canonicalEvent: { type: "task.late_terminal" },
+		canonicalEvent: { type: "task.late_terminal", reused: true },
 	});
 	expect(result.content[0]?.text).toContain("## canonical late terminal recorded");
 	expect(result.content[0]?.text).not.toContain("terminal intent");

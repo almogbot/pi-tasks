@@ -7,7 +7,7 @@ import { abortableSleep } from "./abortable-sleep";
 import { deliverTaskInbox, incorporatedTaskEvents } from "./task-inbox";
 import { TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError } from "./task-protocol";
 import { createWolfpackTaskCore } from "./wolfpack-task-relay";
-import type { TaskCore } from "./task-core";
+import type { SubmitIntentInput, SubmitIntentOutcome, TaskCore } from "./task-core";
 import type { TaskEndpoint, TaskSnapshot } from "./task-protocol";
 
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -266,22 +266,23 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		async execute(_id, params, signal) {
 			try {
 				const activeCore = await configuredCore(signal);
-				const priorTask = activeCore.getTask(params.taskId);
-				const originWasTerminal = priorTask !== undefined && sameEndpoint(priorTask.origin, activeCore.endpoint) && terminal(priorTask.status);
+				let submission: SubmitIntentOutcome | undefined;
 				try {
-					await activeCore.submitIntent({ taskId: params.taskId, type: `task.${params.status}`, payload: { summary: params.summary, ...(params.result === undefined ? {} : { result: params.result }), ...(params.error === undefined ? {} : { error: params.error }), ...(params.artifacts === undefined ? {} : { artifacts: params.artifacts }) } }, signal);
+					const input: SubmitIntentInput = { taskId: params.taskId, type: `task.${params.status}`, payload: { summary: params.summary, ...(params.result === undefined ? {} : { result: params.result }), ...(params.error === undefined ? {} : { error: params.error }), ...(params.artifacts === undefined ? {} : { artifacts: params.artifacts }) } };
+					if (activeCore.submitIntentWithOutcome) submission = await activeCore.submitIntentWithOutcome(input, signal);
+					else await activeCore.submitIntent(input, signal);
 				} catch (error) {
 					return blockedDoneResult(activeCore, params.taskId, params.status, error) ?? taskError(error);
 				}
 				const task = activeCore.getTask(params.taskId);
 				if (!task) return taskError(new Error("unknown local task"));
-				if (originWasTerminal) {
+				if (submission?.authority === "origin" && submission.canonicalEvent.type === "task.late_terminal") {
 					return {
-						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalEvent: { type: "task.late_terminal" } }, `## canonical late terminal recorded\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- canonical status remains: ${task.status}\n- ${params.summary}`),
+						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalEvent: submission.canonicalEvent }, `## canonical late terminal recorded\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- canonical status remains: ${task.status}\n- ${params.summary}`),
 						terminate: true,
 					};
 				}
-				if (sameEndpoint(task.origin, activeCore.endpoint) && task.status === params.status) {
+				if (submission?.authority === "origin" && task.status === params.status) {
 					return {
 						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalCompletion: { state: "confirmed", status: task.status } }, `## task ${task.status}\n- task: \`${params.taskId}\`\n- canonical status: ${task.status}\n- ${params.summary}`),
 						terminate: true,

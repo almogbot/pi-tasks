@@ -95,6 +95,20 @@ describe("endpoint-owned task core", () => {
 		expect(value.origin.getTask(created.taskId)?.events).toHaveLength(2);
 	});
 
+	test("returns the structured canonical outcome when an origin operation is reused", async () => {
+		const value = fixture();
+		await value.origin.connect();
+		await value.receiver.connect();
+		const created = await value.origin.createTask({ target: RECEIVER, task: "cancel", timeoutMs: 500 });
+
+		const first = await value.origin.submitIntentWithOutcome!({ taskId: created.taskId, type: "task.cancelled", payload: {} });
+		const retry = await value.origin.submitIntentWithOutcome!({ taskId: created.taskId, type: "task.cancelled", payload: {} });
+
+		expect(first).toEqual({ authority: "origin", canonicalEvent: { type: "task.cancelled", reused: false } });
+		expect(retry).toEqual({ authority: "origin", canonicalEvent: { type: "task.cancelled", reused: true } });
+		expect(value.origin.getTask(created.taskId)?.events.map((event) => event.type)).toEqual(["task.created", "task.cancelled"]);
+	});
+
 	test("receiver persists an intent before an uncertain send and recovers it with its stable envelope id", async () => {
 		const value = fixture();
 		await value.origin.connect();

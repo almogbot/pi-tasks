@@ -31,5 +31,5 @@ export type {
 	TaskRecord,
 	TaskRelay,
 } from "./task-protocol";
-export type { TaskCore, TaskCoreOptions } from "./task-core";
+export type { SubmitIntentOutcome, TaskCore, TaskCoreOptions } from "./task-core";
 export type { TaskStore, TaskStoreOptions } from "./task-store";
