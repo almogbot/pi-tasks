@@ -33,13 +33,13 @@ IMPLEMENTER_MODEL="${WOLFPACK_IMPLEMENTER_MODEL:-openai-codex/gpt-5.6-terra}"
 REVIEWER_MODEL="${WOLFPACK_REVIEWER_MODEL:-openai-codex/gpt-5.6-sol}"
 ```
 
-1. create or select a role session. For a disposable worker, omit an initial assignment prompt and pass the resolved role model: `wolfpack agent spawn <project> --name <task-role> --model "$IMPLEMENTER_MODEL" --json` (or `"$REVIEWER_MODEL"` for review). Put all worker instructions in `agent_task_send.task` so the new Pi process can become idle before assignment.
-2. verify structured session readiness, wait for extension registration, and read `taskEndpoint` from `wolfpack session status <session> --json`.
+1. create or select a role session. For a new endpoint worker, use its explicit root and resolved role model without a startup assignment: `wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --model "$IMPLEMENTER_MODEL" --task-worker --readiness-timeout-ms 30000 --json` (or `"$REVIEWER_MODEL"` for review). Put all worker instructions in `agent_task_send.task`. This Pi-only mode rejects prompts/plans and `--notify-parent`.
+2. read the ready `taskEndpoint` from creation success, or verify an existing role's structured liveness, root, harness, and endpoint through `wolfpack session status <stable-session-id> --json`. `TASK_WORKER_PREFLIGHT_FAILED` precedes creation; `TASK_WORKER_NOT_READY` retains `createdSession` and `cleanup`. Inspect an `unconfirmed` cleanup by exact stable ID before retrying. Registration is not model/task execution evidence; report unsupported readiness instead of silently falling back.
 3. call `agent_task_send` with that endpoint and the complete instructions. Keep working; use `agent_task_status` or `agent_task_inbox` for structured evidence, and call `agent_task_wait` only when explicitly asked to block.
 4. use `agent_task_message` for durable questions, answers, and information. The receiver calls `agent_task_done` as its final action; no completion prose follows.
 5. independently verify the result, call `agent_task_ack({ taskId })` once for that terminal task, then explicitly retain or close only the role sessions the parent spawned.
 
-Coordinator-capable agents may delegate further when justified, and the spawning coordinator owns each child's lifecycle. After terminal completion and acknowledgment, deliberately retain the child or run `wolfpack kill <stable-session-id> --json`, then verify that exact ID is absent from `wolfpack list --json`. Never use `wolfpack session send`, `/exit`, or `/quit` for cleanup; terminal input is not Wolfpack teardown.
+Coordinator-capable agents may delegate further when justified, and the spawning coordinator owns each child's lifecycle. Endpoint assignments require terminal completion and one `agent_task_ack`; full-startup children have no task ID, so use their explicit completion/block notification and parent verification instead. Then deliberately retain the child or run `wolfpack kill <stable-session-id> --json`, and verify that exact ID is absent from `wolfpack list --json`. Never use `wolfpack session send`, `/exit`, or `/quit` for cleanup; terminal input is not Wolfpack teardown.
 
 ## worker-only execution gate
 

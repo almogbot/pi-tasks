@@ -63,7 +63,12 @@ describe("v2-only package", () => {
 			task: "implement the narrow change and run focused tests",
 		}, null, 2));
 		for (const document of [readme, skill]) {
-			expect(document).toContain('wolfpack agent spawn <project> --name <task-role> --model "$IMPLEMENTER_MODEL" --json');
+			expect(document).toContain('wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --model "$IMPLEMENTER_MODEL" --task-worker --readiness-timeout-ms 30000 --json');
+			expect(document).toContain("TASK_WORKER_PREFLIGHT_FAILED");
+			expect(document).toContain("TASK_WORKER_NOT_READY");
+			expect(document).toContain("createdSession");
+			expect(document).toContain("unconfirmed");
+			expect(document).toContain("rejects prompts/plans and `--notify-parent`");
 			expect(document).toContain("WOLFPACK_IMPLEMENTER_MODEL");
 			expect(document).toContain("WOLFPACK_REVIEWER_MODEL");
 			expect(document).toContain("openai-codex/gpt-5.6-terra");
@@ -76,7 +81,7 @@ describe("v2-only package", () => {
 		}
 		expect(readme).toContain("Explicit user or project choices override those defaults.");
 		expect(skill).toContain("an explicit user or project model choice overrides the environment/default.");
-		expect(skill).toContain("Do not start a disposable worker with a blocking");
+		expect(skill).toContain("do not start a blocking “wait for assignments” prompt");
 		expect(readme).toContain("pre-persistence validation rejection creates no task");
 		expect(readme).toContain("idempotency remains necessary");
 	});
@@ -98,6 +103,9 @@ describe("v2-only package", () => {
 			expect(document).toContain("PI_TASK_WORKER_COORDINATION_FORBIDDEN");
 			expect(document).toContain("Generic role-orchestration guidance applies only to non-worker coordinators.");
 		}
+		expect(readme).toContain("Endpoint assignments require terminal completion and one `agent_task_ack`");
+		expect(readme).toContain("full-startup children have no task ID");
+		expect(skill).toContain("Full-startup children have no endpoint task ID");
 		for (const detail of [
 			"one persistent implementer and one persistent read-only reviewer",
 			"Do not rotate a healthy role session for routine corrections",

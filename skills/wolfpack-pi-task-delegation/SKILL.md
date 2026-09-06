@@ -31,8 +31,9 @@ Pass `--model "$IMPLEMENTER_MODEL"` when spawning the editing implementer and `-
 
 - load this package's default extension in every participating Pi process and set `WOLFPACK_SESSION_NAME`. Set `WOLFPACK_PORT` only when the local Wolfpack control port differs from `18790`.
 - address `agent_task_send` targets only as `to: { relay, id }`. For the default Wolfpack adapter, the relay is `wolfpack-pi-tasks-v2` and the ID is opaque.
-- create a disposable worker without an initial assignment prompt: `wolfpack agent spawn <project> --name <task-role> --model "$IMPLEMENTER_MODEL" --json` (or `"$REVIEWER_MODEL"` for review). Do not start a disposable worker with a blocking “wait for assignments” prompt. Put the complete instructions in `agent_task_send.task`.
-- after the target extension registers, run structured session control (`wolfpack session status <session> --json`) and read its `taskEndpoint`. Do not derive endpoint IDs from session names, broker IDs, terminal labels, output, or prose.
+- create an endpoint worker with opt-in readiness and no initial assignment prompt: `wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --model "$IMPLEMENTER_MODEL" --task-worker --readiness-timeout-ms 30000 --json` (or `"$REVIEWER_MODEL"` for review). Use the actual explicit project root. This Pi-only mode rejects prompts/plans and `--notify-parent`; do not start a blocking “wait for assignments” prompt. Put the complete instructions in `agent_task_send.task`.
+- read the returned `taskEndpoint` after exact live session/root and relay registration readiness succeeds. For a selected existing session, inspect structured status by its stable ID. Do not derive endpoint IDs from session names, broker IDs, terminal labels, output, or prose. Registration proves neither provider/model readiness nor task execution.
+- inspect typed creation errors before retrying: `TASK_WORKER_PREFLIGHT_FAILED` precedes creation; `TASK_WORKER_NOT_READY` retains `createdSession` and `cleanup`. An `unconfirmed` cleanup requires exact-ID inspection, not an assumption that the session is gone. Do not silently fall back to ordinary spawn if the installed Wolfpack lacks readiness support; report the capability gap.
 - pass the returned endpoint without translation:
 
 ```json
@@ -49,7 +50,7 @@ The default `agent_task_send` schema is exactly `to`, `task`, and optional `time
 
 For a multi-step project phase, retain one persistent implementer and one persistent read-only reviewer. Give the implementer the whole approved phase, including required commit ordering and focused verification, rather than opening one task per issue or checkpoint. Reuse a healthy role session for corrections and follow-up review; a completed task finishes one assignment, not the underlying session. Do not rotate a healthy role session for routine corrections. Rotate only for phase completion, material context degradation, harness failure, or required specialist independence. Keep at most one active assignment per role unless the user explicitly approves parallel work.
 
-A coordinator-capable agent may delegate further when the quality or throughput gain justifies it. The spawning coordinator owns each child's complete lifecycle: record the stable session ID, acknowledge its terminal task once, then deliberately retain the child or close it with `wolfpack kill <stable-session-id> --json` and verify that exact ID is absent from `wolfpack list --json`.
+A coordinator-capable agent may delegate further when the quality or throughput gain justifies it. For an endpoint assignment, the spawning coordinator owns task lifecycle: record the stable session ID, acknowledge its terminal task once, then deliberately retain the child or close it with `wolfpack kill <stable-session-id> --json` and verify that exact ID is absent from `wolfpack list --json`. Full-startup children have no endpoint task ID; use their explicit completion/block notification plus parent verification before the same retain-or-exact-ID-kill decision.
 
 `PI_TASK_WORKER=1` sessions are leaf roles. Workers cannot call `agent_task_send`; workers cannot call `agent_task_cancel`; workers cannot call `agent_task_ack`. These coordinator-tool attempts are blocked with the stable reason `PI_TASK_WORKER_COORDINATION_FORBIDDEN`, not the pre-assignment reason. They may use `agent_task_message` only for the eligible incorporated assignment named by its input `taskId`. Generic role-orchestration guidance applies only to non-worker coordinators. Task workers must not create, rotate, or close Wolfpack sessions through shell or session-control tools.
 
@@ -70,7 +71,7 @@ Assignment completion ends the assigned task, not the reusable role session. Whe
 
 ## v2 workflow
 
-1. create or select the role session, verify its structured project and terminal readiness, then obtain its registered `taskEndpoint`.
+1. create a role session through the readiness path above, or select an existing role by stable ID and verify its structured liveness, canonical project, Pi harness, and registered `taskEndpoint`. Never use terminal output as readiness evidence.
 2. call `agent_task_send` with the opaque endpoint and concise instructions in `task`. The tool returns after relay acceptance only, not Pi insertion or model execution. If submission reports a retryable delivery error after local persistence, use the structured task ID from the error and inspect it rather than creating an unrelated replacement.
 3. keep working. Use `agent_task_status` or `agent_task_inbox` only at meaningful checkpoints or when progress evidence is needed; do not turn status checks into lifecycle chatter. Call `agent_task_wait` only when the user explicitly asks to block.
 4. use `agent_task_message` for durable `question`, `answer`, or `information` flow. Do not use rendered text, terminal output, or logs as lifecycle evidence.
