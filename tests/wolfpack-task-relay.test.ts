@@ -287,6 +287,7 @@ test("preserves relay error code and retryability from rejected sends", async ()
 		protocolVersion: TASK_PROTOCOL_VERSION,
 		source: endpoint,
 		target: { relay: "wolfpack-pi-tasks-v2", id: "inactive" },
+		createdAt: "2026-09-08T00:00:00.000Z",
 		taskId: "task-1",
 		kind: "assignment",
 		payload: "{}",

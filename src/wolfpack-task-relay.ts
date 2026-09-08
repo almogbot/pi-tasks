@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { createTaskCore } from "./task-core";
 import { createTaskStore } from "./task-store";
-import { TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
+import { INVALID_RELAY_METADATA, TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
 import type {
 	RelayAcceptance,
 	RelayConnectInput,
@@ -139,10 +139,13 @@ export function createWolfpackTaskRelay(options: WolfpackTaskRelayOptions = {}):
 			return response.endpoint;
 		},
 		async send(input: RelayEnvelope, signal?: AbortSignal): Promise<RelayAcceptance> {
+			// Validate/capture before registration or any send. A fresh timestamp or
+			// process-local cache cannot safely retry a previously accepted envelope.
+			const envelope = toWolfpackEnvelope(input);
 			await register(signal);
 			const response = await request<WolfpackSendResponse>(requestFetch, baseUrl, requestTimeoutMs, "POST", "/api/task-relay/v2/send", {
 				callerSession: requiredSession(callerSession),
-				envelope: toWolfpackEnvelope(input),
+				envelope,
 			}, signal);
 			if (!nonEmpty(response.acceptanceId)) throw new TaskProtocolError("INVALID_ACCEPTANCE", "Wolfpack relay returned an invalid acceptance");
 			return { envelopeId: input.envelopeId };
@@ -214,6 +217,12 @@ function bindRegisteredEndpoint(store: TaskStore, endpoint: TaskEndpoint, now: n
 }
 
 function toWolfpackEnvelope(envelope: RelayEnvelope): WolfpackRelayEnvelope {
+	const createdAt = envelope.createdAt;
+	if (!transportTimestamp(createdAt)) {
+		throw new TaskProtocolError(INVALID_RELAY_METADATA, "relay envelope requires an immutable persisted creation timestamp; legacy wire metadata cannot be reconstructed safely", {
+			retryable: false, details: { envelopeId: envelope.envelopeId, reason: createdAt === undefined ? "missing" : "invalid" },
+		});
+	}
 	let payload: unknown;
 	try {
 		payload = JSON.parse(envelope.payload) as unknown;
@@ -226,7 +235,7 @@ function toWolfpackEnvelope(envelope: RelayEnvelope): WolfpackRelayEnvelope {
 		source: envelope.source,
 		target: envelope.target,
 		payload: { taskId: envelope.taskId, kind: envelope.kind, payload },
-		createdAt: new Date().toISOString(),
+		createdAt,
 	};
 }
 
@@ -311,6 +320,12 @@ function requiredSession(sessionName: string | undefined): string {
 
 function boundedRequestTimeout(value: number): number {
 	return Number.isInteger(value) && value >= 1 && value <= MAX_REQUEST_TIMEOUT_MS ? value : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+function transportTimestamp(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
 function futureTimestamp(value: unknown): value is string {

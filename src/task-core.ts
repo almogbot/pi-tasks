@@ -1,5 +1,6 @@
 import {
 	MAX_RELAY_PAYLOAD_BYTES,
+	INVALID_RELAY_METADATA,
 	ORIGIN_CANCELLATION_OPERATION,
 	PARENT_ACKNOWLEDGMENT_OPERATION,
 	TASK_PROTOCOL_VERSION,
@@ -133,7 +134,7 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 				createdAt: now, expiresAt: now + input.timeoutMs, status: "active",
 			};
 			const created = event(task, ids(), "task.created", "1", options.endpoint, target, now, { task: input.task });
-			const assignment = envelope(ids(), options.endpoint, target, taskId, TaskEnvelopeKind.assignment, { task, event: created });
+			const assignment = envelope(ids(), options.endpoint, target, taskId, TaskEnvelopeKind.assignment, { task, event: created }, now);
 			options.store.transaction(() => {
 				options.store.putTask(task);
 				options.store.appendEvent(created);
@@ -306,7 +307,7 @@ function persistIntent(options: TaskCoreOptions, now: () => number, ids: () => s
 		}
 	}
 	options.store.putIntent(intent.intentId, input.taskId, envelopeId);
-	options.store.putOutbox(envelope(envelopeId, options.endpoint, task.origin, input.taskId, TaskEnvelopeKind.intent, intent));
+	options.store.putOutbox(envelope(envelopeId, options.endpoint, task.origin, input.taskId, TaskEnvelopeKind.intent, intent, now()));
 	return { envelopeIds: [envelopeId], outcome: { authority: "receiver" } };
 }
 
@@ -346,8 +347,8 @@ function canonicalize(options: TaskCoreOptions, now: () => number, ids: () => st
 	const type = terminal && TERMINAL_STATUSES.has(task.status) ? "task.late_terminal" : requestedType;
 	const sequence = String(task.events.length + 1);
 	const canonical = event(task, ids(), type, sequence, options.endpoint, task.target, now(), { intentId: intent.intentId, ...intent.payload });
-	const targetEnvelope = envelope(ids(), options.endpoint, task.target, task.taskId, TaskEnvelopeKind.canonicalEvent, canonical);
-	const originEnvelope = sameEndpoint(task.origin, task.target) ? undefined : envelope(ids(), options.endpoint, task.origin, task.taskId, TaskEnvelopeKind.canonicalEvent, canonical);
+	const targetEnvelope = envelope(ids(), options.endpoint, task.target, task.taskId, TaskEnvelopeKind.canonicalEvent, canonical, canonical.occurredAt);
+	const originEnvelope = sameEndpoint(task.origin, task.target) ? undefined : envelope(ids(), options.endpoint, task.origin, task.taskId, TaskEnvelopeKind.canonicalEvent, canonical, canonical.occurredAt);
 	const persistedEnvelopeIds = originEnvelope === undefined ? [targetEnvelope.envelopeId] : [targetEnvelope.envelopeId, originEnvelope.envelopeId];
 	if (operation !== undefined) {
 		const reservation = options.store.reserveTaskOperation({ taskId: task.taskId, operation, logicalId: canonical.eventId, logicalType: canonical.type, envelopeIds: persistedEnvelopeIds });
@@ -378,7 +379,7 @@ async function flush(options: TaskCoreOptions, signal: AbortSignal | undefined, 
 			options.store.transaction(() => { options.store.markOutboxAccepted(record.envelope.envelopeId); });
 		} catch (error) {
 			if (signal?.aborted || (error instanceof TaskProtocolError && error.code === "ABORTED")) throw error;
-			if (error instanceof TaskProtocolError && error.code === TARGET_NOT_REGISTERED_CODE && !error.retryable) {
+			if (error instanceof TaskProtocolError && (error.code === TARGET_NOT_REGISTERED_CODE || error.code === INVALID_RELAY_METADATA) && !error.retryable) {
 				options.store.transaction(() => {
 					options.store.quarantineOutbox(record.envelope.envelopeId, {
 						errorCode: error.code,
@@ -413,8 +414,8 @@ function event(task: Omit<TaskRecord, "events">, eventId: string, type: string, 
 	return { eventId, taskId: task.taskId, type, sequence, source, target, occurredAt, payload };
 }
 
-function envelope(envelopeId: string, source: TaskEndpoint, target: TaskEndpoint, taskId: string, kind: RelayEnvelope["kind"], payload: unknown): RelayEnvelope {
-	return { envelopeId, protocolVersion: TASK_PROTOCOL_VERSION, source, target, taskId, kind, payload: JSON.stringify(payload) };
+function envelope(envelopeId: string, source: TaskEndpoint, target: TaskEndpoint, taskId: string, kind: RelayEnvelope["kind"], payload: unknown, createdAt: number): RelayEnvelope {
+	return { envelopeId, protocolVersion: TASK_PROTOCOL_VERSION, source, target, taskId, kind, payload: JSON.stringify(payload), createdAt: new Date(createdAt).toISOString() };
 }
 
 function parsePayload(envelope: RelayEnvelope): unknown {

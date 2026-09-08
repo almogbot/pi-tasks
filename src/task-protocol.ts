@@ -1,5 +1,6 @@
 export const TASK_PROTOCOL_VERSION = "pi-tasks/v2" as const;
 export const MAX_RELAY_PAYLOAD_BYTES = 48 * 1024;
+export const INVALID_RELAY_METADATA = "INVALID_RELAY_METADATA";
 export const ORIGIN_CANCELLATION_OPERATION = "origin_cancellation";
 export const PARENT_ACKNOWLEDGMENT_OPERATION = "parent_acknowledgment";
 export const TERMINAL_INTENT_OPERATION = "terminal_intent";
@@ -54,6 +55,9 @@ export interface RelayEnvelope {
 	readonly target: TaskEndpoint;
 	readonly taskId: string;
 	readonly kind: TaskEnvelopeKind;
+	/** Immutable transport creation time, persisted with new outbox envelopes.
+	 * Received/legacy records may omit it; Wolfpack sends require it. */
+	readonly createdAt?: string;
 	/** Opaque to relays. The endpoint protocol defines its JSON representation. */
 	readonly payload: string;
 }
