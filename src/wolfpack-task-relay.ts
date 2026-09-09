@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { createTaskCore } from "./task-core";
-import { wolfpackEndpointView } from "./wolfpack-endpoint-view";
+import { WOLFPACK_TASK_RELAY_ID, wolfpackEndpointView } from "./wolfpack-endpoint-view";
 import { createTaskStore } from "./task-store";
 import { INVALID_RELAY_METADATA, TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
 import type {
@@ -21,7 +21,7 @@ import type {
 import type { TaskCoreOptions } from "./task-core";
 import type { TaskStore, TaskStoreOptions } from "./task-store";
 
-export const WOLFPACK_TASK_RELAY_ID = "wolfpack-pi-tasks-v2";
+export { WOLFPACK_TASK_RELAY_ID } from "./wolfpack-endpoint-view";
 export const WOLFPACK_TASK_RELAY_PROTOCOL_VERSION = 2;
 export const WOLFPACK_TASK_RELAY_LEASE_MS = 60_000;
 const DEFAULT_WOLFPACK_PORT = 18_790;

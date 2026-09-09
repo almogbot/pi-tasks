@@ -24,7 +24,7 @@ The `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. 
 
 Wolfpack owns durable mailbox delivery and peer forwarding; Pi owns lifecycle, logical event order, receipts, and local SQLite state. `agent_task_send` returns after relay acceptance only, not Pi insertion or model execution. The receiver inserts model-visible events as structured `pi-tasks-event` custom messages through Pi's safe `deliverAs: "followUp"` queue and records structured `{ taskId, eventId }` insertion evidence. Replay after Pi has structurally recorded an event cannot create another logical receipt. `createInMemoryTaskRelay` remains exported solely as a deterministic conformance fixture.
 
-## retry-content stability (unreleased correction)
+## retry-content stability (0.1.9)
 
 New core-originated internal `RelayEnvelope` records persist an immutable ISO
 `createdAt` alongside their outbox payload, before relay submission. Assignment,
@@ -69,7 +69,7 @@ Without that explicit source selection the cross-repository test is skipped.
 It does not contact an installed server, live broker or Tailnet peer, and is not
 an end-to-end Pi/model execution, two-host, or volatile-profile test.
 
-## endpoint-view and delivery-checkpoint corrections (unreleased)
+## endpoint-view and delivery-checkpoint corrections (0.1.9)
 
 Peer relay aliases are local routing names, not globally portable endpoint
 identities. On receipt, the adapter projects only protocol-defined assignment and
