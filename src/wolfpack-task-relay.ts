@@ -185,10 +185,11 @@ export function createWolfpackTaskRelay(options: WolfpackTaskRelayOptions = {}):
 export async function createWolfpackTaskCore(options: WolfpackTaskCoreOptions = {}, signal?: AbortSignal): Promise<ReturnType<typeof createTaskCore>> {
 	const sessionName = options.sessionName ?? process.env.WOLFPACK_SESSION_NAME;
 	const store = createTaskStore({ path: options.path ?? wolfpackTaskStorePath(requiredSession(sessionName)) });
-	const generation = options.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
-	store.transaction(() => { store.setEndpointGeneration(generation); });
-	const relay = createWolfpackTaskRelay({ ...options, sessionName, generation });
 	try {
+		if (store.getRelayTransportBinding()) throw new TaskProtocolError("RELAY_PROFILE_REQUIRED", "this store is bound to an explicitly negotiated relay profile", { retryable: false });
+		const generation = options.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
+		store.transaction(() => { store.setEndpointGeneration(generation); });
+		const relay = createWolfpackTaskRelay({ ...options, sessionName, generation });
 		const endpoint = await relay.endpoint(signal);
 		bindRegisteredEndpoint(store, endpoint, options.clock?.now() ?? Date.now());
 		return createTaskCore({ endpoint, relay, store, ...(options.clock === undefined ? {} : { clock: options.clock }), ...(options.ids === undefined ? {} : { ids: options.ids }) });
@@ -220,7 +221,7 @@ function bindRegisteredEndpoint(store: TaskStore, endpoint: TaskEndpoint, now: n
 	});
 }
 
-function toWolfpackEnvelope(envelope: RelayEnvelope): WolfpackRelayEnvelope {
+export function toWolfpackEnvelope(envelope: RelayEnvelope): WolfpackRelayEnvelope {
 	const createdAt = envelope.createdAt;
 	if (!transportTimestamp(createdAt)) {
 		throw new TaskProtocolError(INVALID_RELAY_METADATA, "relay envelope requires an immutable persisted creation timestamp; legacy wire metadata cannot be reconstructed safely", {
@@ -243,7 +244,7 @@ function toWolfpackEnvelope(envelope: RelayEnvelope): WolfpackRelayEnvelope {
 	};
 }
 
-function fromWolfpackEnvelope(envelope: WolfpackRelayEnvelope): RelayEnvelope {
+export function fromWolfpackEnvelope(envelope: WolfpackRelayEnvelope): RelayEnvelope {
 	if (!nonEmpty(envelope.envelopeId) || envelope.protocolVersion !== WOLFPACK_TASK_RELAY_PROTOCOL_VERSION || !isEndpoint(envelope.source) || !isEndpoint(envelope.target)) {
 		throw new TaskProtocolError("INVALID_ENVELOPE", "Wolfpack relay returned an invalid envelope");
 	}

@@ -100,10 +100,60 @@ response loss/reopen, both-direction task messages and canonical/self fanout.
 Broker/topology are synthetic: this is not live Tailnet/auth, compiled-worker,
 physical-device or Pi/model execution proof.
 
-These corrections do **not** activate the memory-owned profile. Negotiated profile/epoch
-binding, actual sparse HTTP delivery cursors, live reset/rebind and terminal
-forwarding outcomes remain outstanding. Endpoint-scoped checkpoints are not a
-substitute for binding the future volatile adapter to its exact relay epoch.
+These corrections alone do **not** activate the memory-owned profile. The
+experimental session below stages profile/epoch binding, sparse cursors and
+reset/rebind separately. The default adapter's existing cursor/forwarding
+assumptions and production cutover remain unchanged.
+
+## experimental memory-owned transport session
+
+`createVolatileTaskSession({ url, callerSession, store })` is an explicit,
+programmatic opt-in for the staged Wolfpack transport. The URL must be an
+explicitly trusted HTTPS or loopback endpoint ingress. **No production route is
+mounted by this package, and the default extension/factory remains on its current
+transport.** Do not point this at an installed server expecting automatic fallback.
+
+- `connect()` negotiates and durably binds profile, epoch, endpoint, generation,
+  caller and URL before exposing a task core. A matching process reopen renews the
+  same binding; every operation includes the exact epoch and endpoint.
+- Inbox deliveries retain their actual decimal cursors, including sparse values
+  beyond JavaScript's safe integer range. Requests are capped at 50 deliveries;
+  malformed, oversized or inconsistent pages are rejected, never sliced with a
+  cursor advanced past omitted deliveries.
+- Successful sends require a matching destination-confirmed acceptance, never a
+  pending-forwarding receipt. Terminal unconfirmed/expired/conflicting delivery
+  errors use existing outbox quarantine and preserve unknown-outcome evidence.
+- Reset/expired registration or changed endpoint/epoch stops that session and
+  persists a reset marker. Pending prior-source envelopes are quarantined unchanged;
+  accepted records and task authority/history are retained.
+- `rebind()` is an **explicit owner action**, not an automatic retry. Inspect the
+  reset and possibly delivered work first. It retires the old binding and creates
+  a fresh generation/endpoint with a fresh cursor scope. Retained old core handles
+  issued by this API cannot mutate the store; the successor cannot issue intents for historical tasks
+  it does not own. No old task identities or exhausted envelope IDs are rearmed.
+- `status()` reports local binding state, not model readiness. `close()` stops the
+  transport; the caller must then close its own store. Request/body deadlines and
+  byte/concurrency bounds also apply when injected transports ignore abort.
+
+Late replies and competing controllers cannot overwrite a successor binding or
+quarantine its work. This is not an exclusive cross-process broker-registration
+lease; a racing registration can still force an explicit reset on a subsequent
+operation. No availability or task recovery across such races is promised.
+
+Profile-bound stores cannot silently reopen through the default factory. Delivery
+checkpoints are now scoped by profile/epoch as well as endpoint. These are metadata
+in the existing endpoint SQLite store, not relay recovery storage or a schema
+migration. No terminal input, installed extension, provider, broker or service is
+changed by importing the new API.
+
+The optional `tests/volatile-real-worker.test.ts` uses the existing explicit
+trusted-source/revision test variables. It exercises actual adapter/core/SQLite,
+loopback HTTP and two real volatile workers, including withheld peer confirmation,
+sparse ACK gaps, ACK response loss/reopen, worker epoch replacement, durable reset
+and explicit rebind. HTTP ingress and broker/topology are private fixtures: this
+is not production auth/discovery/schema, compiled release packaging, physical
+Tailnet or Pi/model execution proof. Production cutover and full-path performance
+measurements remain separate work.
 
 ## delegation workflow
 

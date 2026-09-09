@@ -1,6 +1,8 @@
 export { createInMemoryTaskRelay, InMemoryTaskRelay } from "./in-memory-task-relay";
 export { createTaskCore } from "./task-core";
 export { createTaskStore } from "./task-store";
+export { createVolatileTaskSession, VOLATILE_PROFILE } from "./volatile-task-session";
+export type { VolatileTaskSession, VolatileTaskSessionOptions } from "./volatile-task-session";
 export {
 	createWolfpackTaskCore,
 	createWolfpackTaskRelay,
@@ -25,6 +27,7 @@ export type {
 	RelayInboxPage,
 	RelayReceiveRequest,
 	RelayTargetReference,
+	RelayTransportBinding,
 	TaskEndpoint,
 	TaskEvent,
 	TaskIntent,

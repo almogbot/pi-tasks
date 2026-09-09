@@ -1,0 +1,135 @@
+import { expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { createTaskStore } from "../src/task-store";
+import { createVolatileTaskSession } from "../src/volatile-task-session";
+
+const wolfpack = process.env.PI_TASKS_WOLFPACK_SOURCE;
+const revision = process.env.PI_TASKS_WOLFPACK_REVISION;
+
+test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer confirmation loss, SQLite reopen and explicit epoch rebind", async () => {
+  expect(isAbsolute(wolfpack!)).toBe(true);
+  expect(revision).toMatch(/^[0-9a-f]{40}$/);
+  expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: wolfpack, encoding: "utf8" }).trim()).toBe(revision!);
+  expect(execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], { cwd: wolfpack, encoding: "utf8" }).trim()).toBe("");
+  const { WorkerRelayGateway } = await import(join(wolfpack!, "src/task-relay/worker-client.ts"));
+  const root = mkdtempSync(join(tmpdir(), "tasks-volatile-workers-"));
+  const stores: ReturnType<typeof createTaskStore>[] = [];
+  const sessions: ReturnType<typeof createVolatileTaskSession>[] = [];
+  const servers: ReturnType<typeof Bun.serve>[] = [];
+  const workers: Array<{ close(): Promise<void> }> = [];
+  const origins = new Map<string, string>();
+  const peerFrames: unknown[] = [];
+  let loseConfirmation = true, loseAck = true;
+  const make = async (name: string) => {
+    const origin = `https://${name}.tail123.ts.net`;
+    const createWorker = () => new WorkerRelayGateway({ profile: "volatile-v1", root: join(root, name), peerOrigin: origin,
+      inspectSession: async (selector: string) => ({ ok: true, session: selector, sessionId: selector, projectPath: root, harness: "pi", alive: true }),
+      peerFetch: async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const parsed = new URL(String(input)), loopback = origins.get(parsed.origin);
+        if (!loopback) throw new Error("unknown fixture origin");
+        return fetch(loopback + parsed.pathname, init);
+      },
+    });
+    let worker = createWorker(); workers.push(worker); await worker.initialize();
+    const calls: any[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, maxRequestBodySize: 64 * 1024, async fetch(request) {
+      const body = await request.json();
+      const path = new URL(request.url).pathname;
+      if (path === "/api/task-relay/volatile-v1/peer") {
+        // Test-only trusted-peer ingress. No production authentication claim.
+        peerFrames.push(structuredClone(body));
+        const result = await worker.volatilePeer(body);
+        if (loseConfirmation) { loseConfirmation = false; return new Response("confirmation discarded after acceptance", { status: 503 }); }
+        return Response.json(result, { status: result.ok ? 200 : 409 });
+      }
+      if (path !== "/staged") return new Response(null, { status: 404 });
+      calls.push(structuredClone(body));
+      const result = await worker.volatile(body);
+      if (name === "b" && (body as { operation?: string }).operation === "acknowledge" && result.ok && loseAck) {
+        loseAck = false; return new Response("ACK confirmation discarded after acceptance", { status: 503 });
+      }
+      return Response.json(result, { status: result.ok ? 200 : 409 });
+    } }); servers.push(server);
+    const baseUrl = `http://127.0.0.1:${server.port}`; origins.set(origin, baseUrl);
+    return { origin, url: `${baseUrl}/staged`, calls, get worker() { return worker; }, async restart() {
+      await worker.close(); worker = createWorker(); workers.push(worker); await worker.initialize();
+    } };
+  };
+  try {
+    const a = await make("a"), b = await make("b");
+    let aStore = createTaskStore({ path: join(root, "a.sqlite") }); stores.push(aStore);
+    let bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores.push(bStore);
+    let aSession = createVolatileTaskSession({ url: a.url, callerSession: "origin", store: aStore }); sessions.push(aSession);
+    let bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
+    let ac = await aSession.connect(); let bc = await bSession.connect();
+    const aBinding = aStore.getRelayTransportBinding()!, bBinding = bStore.getRelayTransportBinding()!;
+    const resolved = await a.worker.volatileTopology({ operation: "resolvePeer", profile: aBinding.profile, epoch: aBinding.epoch,
+      callerSession: "origin", endpoint: aBinding.endpoint, origin: b.origin, peerEpoch: bBinding.epoch, target: bc.endpoint });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok || resolved.value.kind !== "resolved") throw new Error("fixture topology failed");
+    const target = resolved.value.endpoint;
+    await expect(ac.createTask({ target, task: "first", timeoutMs: 60_000 })).rejects.toMatchObject({ code: "PEER_UNREACHABLE", retryable: true });
+    expect(aStore.outbox("pending")).toHaveLength(1); expect(aStore.outbox("accepted")).toEqual([]);
+    aSession.close(); aStore.close();
+    aStore = createTaskStore({ path: join(root, "a.sqlite") }); stores[0] = aStore;
+    aSession = createVolatileTaskSession({ url: a.url, callerSession: "origin", store: aStore }); sessions.push(aSession);
+    ac = await aSession.connect();
+    expect(aStore.getRelayTransportBinding()).toEqual(aBinding);
+    await new Promise(resolve => setTimeout(resolve, 1050));
+    await ac.flushOutbox();
+    expect(peerFrames).toHaveLength(2); expect(peerFrames[1]).toEqual(peerFrames[0]);
+    expect(aStore.outbox("pending")).toEqual([]); expect(aStore.outbox("accepted")).toHaveLength(1);
+    await ac.createTask({ target, task: "second", timeoutMs: 60_000 });
+    await ac.createTask({ target, task: "third", timeoutMs: 60_000 });
+    const first = await bc.receive(); expect(first.map(d => d.cursor)).toEqual(["1", "2", "3"]);
+    await expect(bc.acknowledgeRelayDelivery("2")).rejects.toMatchObject({ code: "RELAY_UNAVAILABLE" });
+    expect(bStore.getReceiveCursor()).toBe("0");
+    bSession.close(); bStore.close();
+    bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores[1] = bStore;
+    bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
+    bc = await bSession.connect(); // Durable, epoch-bound ACK intent retries without a RAM map.
+    const ackCalls = b.calls.filter(call => call.operation === "acknowledge");
+    expect(ackCalls).toHaveLength(2); expect(ackCalls[1]).toEqual(ackCalls[0]);
+    expect(bStore.getReceiveCursor()).toBe("0");
+    const sparse = await bc.receive(); expect(sparse.map(d => d.cursor)).toEqual(["1", "3"]);
+    expect(sparse[1]!.envelope.envelopeId).toBe(first[2]!.envelope.envelopeId);
+    await bc.acknowledgeRelayDelivery("3");
+    bSession.close(); bStore.close();
+    bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores[1] = bStore;
+    bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
+    bc = await bSession.connect();
+    expect(bStore.getRelayTransportBinding()).toEqual(bBinding);
+    const pending = await bc.receive(); expect(pending.map(d => d.cursor)).toEqual(["1"]);
+    await bc.acknowledgeRelayDelivery("1"); expect(bStore.getReceiveCursor()).toBe("3");
+    await b.restart();
+    await expect(bc.receive()).rejects.toMatchObject({ code: "RELAY_RESET", retryable: false });
+    expect(bStore.getRelayTransportBinding()?.reset).toBe(true);
+    await expect(ac.createTask({ target, task: "old peer lifetime", timeoutMs: 60_000 })).rejects.toMatchObject({ code: "DELIVERY_UNCONFIRMED", retryable: false, details: { mayHaveBeenDelivered: true } });
+    expect(aStore.quarantinedOutbox()).toHaveLength(1);
+    const attempts = peerFrames.length; await ac.flushOutbox(); expect(peerFrames).toHaveLength(attempts);
+    expect(aSession.status().state).toBe("ready"); // Peer failure does not rotate this source.
+    bSession.close(); bStore.close();
+    bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores[1] = bStore;
+    bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
+    const beforeConnect = b.calls.length;
+    await expect(bSession.connect()).rejects.toMatchObject({ code: "RELAY_REBIND_REQUIRED" });
+    expect(b.calls).toHaveLength(beforeConnect);
+    const fresh = await bSession.rebind();
+    expect(fresh.endpoint).not.toEqual(bBinding.endpoint);
+    expect(bStore.getRelayTransportBinding()?.epoch).not.toBe(bBinding.epoch);
+    expect(bStore.getReceiveCursor()).toBe("0");
+    expect(fresh.listTasks()).toHaveLength(3); // History is retained, not rebound.
+    await expect(fresh.submitIntent({ taskId: first[0]!.envelope.taskId, type: "task.completed", payload: { summary: "not authorized for retired endpoint" } })).rejects.toMatchObject({ code: "NOT_PARTICIPANT" });
+    await fresh.createTask({ target: fresh.endpoint, task: "new lifetime", timeoutMs: 60_000 });
+    expect((await fresh.receive()).map(d => d.cursor)).toEqual(["1"]);
+  } finally {
+    for (const session of sessions) session.close();
+    for (const store of stores) store.close();
+    await Promise.all(servers.map(server => server.stop(true)));
+    await Promise.all(workers.map(worker => worker.close()));
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 20_000);

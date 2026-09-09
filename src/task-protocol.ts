@@ -23,6 +23,17 @@ export interface TaskEndpoint {
 	readonly id: string;
 }
 
+/** Endpoint-owned transport binding; not task lifecycle or relay replay state. */
+export interface RelayTransportBinding {
+	readonly profile: "volatile-v1";
+	readonly epoch: string;
+	readonly endpoint: TaskEndpoint;
+	readonly generation: string;
+	readonly callerSession: string;
+	readonly url: string;
+	readonly reset?: true;
+}
+
 /** A provider-defined reference which core resolves without interpreting. */
 export interface RelayTargetReference {
 	readonly relay: string;

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { openSqliteDatabase } from "./sqlite-database";
 import type { SqliteDatabase } from "./sqlite-database";
 import { TERMINAL_INTENT_OPERATION, TaskProtocolError } from "./task-protocol";
-import type { RelayEnvelope, TaskEndpoint, TaskEvent, TaskRecord, TaskSnapshot, TerminalDeliveryState, TerminalTaskIntentType } from "./task-protocol";
+import type { RelayTransportBinding, RelayEnvelope, TaskEndpoint, TaskEvent, TaskRecord, TaskSnapshot, TerminalDeliveryState, TerminalTaskIntentType } from "./task-protocol";
 
 const SCHEMA_VERSION = 5;
 const OWNER_ONLY_MODE = 0o700;
@@ -69,6 +69,8 @@ export interface TaskStore {
 	setEndpointGeneration(generation: string): void;
 	getEndpointBinding(): TaskEndpoint | undefined;
 	setEndpointBinding(endpoint: TaskEndpoint): void;
+	getRelayTransportBinding(): RelayTransportBinding | undefined;
+	setRelayTransportBinding(binding: RelayTransportBinding): void;
 	close(): void;
 }
 
@@ -221,12 +223,28 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
 		setEndpointBinding(endpoint) {
 			database.query("INSERT INTO relay_state (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value").run(ENDPOINT_BINDING_STATE_KEY, JSON.stringify(endpoint));
 		},
+		getRelayTransportBinding() {
+			const row = database.query("SELECT value FROM relay_state WHERE name = 'transport_binding'").get() as { readonly value: string } | null;
+			if (!row) return undefined;
+			let value: unknown;
+			try { value = JSON.parse(row.value) as unknown; } catch { throw new TaskProtocolError("INVALID_RELAY_METADATA", "invalid persisted transport binding", { retryable: false }); }
+			if (!isRecord(value) || value.profile !== "volatile-v1" || typeof value.epoch !== "string" || !isRecord(value.endpoint)
+				|| typeof value.endpoint.relay !== "string" || typeof value.endpoint.id !== "string" || typeof value.generation !== "string"
+				|| typeof value.callerSession !== "string" || typeof value.url !== "string" || (value.reset !== undefined && value.reset !== true)) {
+				throw new TaskProtocolError("INVALID_RELAY_METADATA", "invalid persisted transport binding", { retryable: false });
+			}
+			return value as unknown as RelayTransportBinding;
+		},
+		setRelayTransportBinding(binding) {
+			database.query("INSERT INTO relay_state (name, value) VALUES ('transport_binding', ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value").run(JSON.stringify(binding));
+		},
 		close() { database.close(); },
 	};
 	function checkpointKey(endpoint: TaskEndpoint): string {
 		const bound = store.getEndpointBinding();
 		if (bound && (bound.relay !== endpoint.relay || bound.id !== endpoint.id)) throw new TaskProtocolError("RELAY_RESET", "delivery checkpoint belongs to a retired endpoint", { retryable: false });
-		return `delivery_checkpoint:${JSON.stringify([endpoint.relay, endpoint.id])}`;
+		const transport = store.getRelayTransportBinding();
+		return `delivery_checkpoint:${JSON.stringify(transport ? [endpoint.relay, endpoint.id, transport.profile, transport.epoch] : [endpoint.relay, endpoint.id])}`;
 	}
 	function deliveryCheckpoint(endpoint: TaskEndpoint): DeliveryCheckpoint {
 		const row = database.query("SELECT value FROM relay_state WHERE name = ?").get(checkpointKey(endpoint)) as { readonly value: string } | null;
