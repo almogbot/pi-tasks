@@ -242,12 +242,20 @@ class Transport {
       })()]);
       this.assertActive();
       const data = result.value;
+      // An explicit permanent profile refusal retires an existing lifetime even
+      // when the selected server engine has no volatile epoch to return.
+      if (record(data) && (data.profile === VOLATILE_PROFILE || data.profile === "durable-v2")
+        && data.ok === false && record(data.error) && data.error.code === "RELAY_PROFILE_REQUIRED" && data.error.retryable === false) {
+        if (this.binding) this.retire();
+        throw failure("RELAY_PROFILE_REQUIRED", false);
+      }
       if (!record(data) || data.profile !== VOLATILE_PROFILE) throw failure("RELAY_PROFILE_REQUIRED", false);
       if (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch) this.retire();
       if (data.ok === false && record(data.error) && text(data.error.code) && typeof data.error.retryable === "boolean") {
         if (RESET_CODES.has(data.error.code)) this.retire();
-        if (!uuid(data.epoch) || (this.binding && data.epoch !== this.binding.epoch)) throw failure("INVALID_RESPONSE", true);
-        const details = { ...(data.error.mayHaveBeenDelivered === true && { mayHaveBeenDelivered: true }),
+        const epochlessRejection = data.epoch === undefined && ["RELAY_CAPACITY", "RELAY_UNAVAILABLE", "INVALID_REQUEST", "PEER_POLICY_REQUIRED"].includes(data.error.code);
+        if ((!uuid(data.epoch) && !epochlessRejection) || (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch)) throw failure("INVALID_RESPONSE", true);
+        const details = { ...((data.error.mayHaveBeenDelivered === true || data.error.code === "RELAY_UNAVAILABLE") && { mayHaveBeenDelivered: true }),
           ...(typeof data.error.retryAfterMs === "number" && Number.isFinite(data.error.retryAfterMs) && data.error.retryAfterMs >= 0 && { retryAfterMs: data.error.retryAfterMs }) };
         throw failure(data.error.code, data.error.retryable || RETRY_CODES.has(data.error.code), details);
       }

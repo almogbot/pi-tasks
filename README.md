@@ -123,8 +123,9 @@ transport.** Do not point this at an installed server expecting automatic fallba
 - Successful sends require a matching destination-confirmed acceptance, never a
   pending-forwarding receipt. Terminal unconfirmed/expired/conflicting delivery
   errors use existing outbox quarantine and preserve unknown-outcome evidence.
-- Reset/expired registration or changed endpoint/epoch stops that session and
-  persists a reset marker. Pending prior-source envelopes are quarantined unchanged;
+- Reset/expired registration, changed endpoint/epoch, or an explicit permanent
+  profile refusal from a known server profile stops that session and persists a
+  reset marker (including rollback to a durable server without a volatile epoch). Pending prior-source envelopes are quarantined unchanged;
   accepted records and task authority/history are retained.
 - `rebind()` is an **explicit owner action**, not an automatic retry. Inspect the
   reset and possibly delivered work first. It retires the old binding and creates
@@ -134,6 +135,10 @@ transport.** Do not point this at an installed server expecting automatic fallba
 - `status()` reports local binding state, not model readiness. `close()` stops the
   transport; the caller must then close its own store. Request/body deadlines and
   byte/concurrency bounds also apply when injected transports ignore abort.
+- Known pre-admission HTTP errors may omit an epoch: capacity, unavailable,
+  invalid request and disabled peer policy remain errors, never confirmations.
+  Unavailable outcomes remain possibly delivered. Success, unknown errors and
+  malformed epoch values do not gain an epoch-validation bypass.
 
 Late replies and competing controllers cannot overwrite a successor binding or
 quarantine its work. This is not an exclusive cross-process broker-registration
