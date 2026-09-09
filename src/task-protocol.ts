@@ -86,6 +86,8 @@ export interface RelayInboxPage {
 export interface RelayDeliveryAck {
 	readonly endpoint: TaskEndpoint;
 	readonly cursor: string;
+	/** Durable cursor-to-envelope binding, for identical ACK retry after reopen. */
+	readonly envelopeId?: string;
 }
 
 export interface TaskRelay {
@@ -94,6 +96,7 @@ export interface TaskRelay {
 	resolve(input: RelayTargetReference, signal?: AbortSignal): Promise<TaskEndpoint>;
 	send(input: RelayEnvelope, signal?: AbortSignal): Promise<RelayAcceptance>;
 	receive(input: RelayReceiveRequest, signal?: AbortSignal): Promise<RelayInboxPage>;
+	/** Acknowledge this delivery only, never an implicit cursor prefix. */
 	acknowledgeDelivery(input: RelayDeliveryAck, signal?: AbortSignal): Promise<void>;
 }
 

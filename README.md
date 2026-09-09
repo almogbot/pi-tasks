@@ -69,6 +69,42 @@ Without that explicit source selection the cross-repository test is skipped.
 It does not contact an installed server, live broker or Tailnet peer, and is not
 an end-to-end Pi/model execution, two-host, or volatile-profile test.
 
+## endpoint-view and delivery-checkpoint corrections (unreleased)
+
+Peer relay aliases are local routing names, not globally portable endpoint
+identities. On receipt, the adapter projects only protocol-defined assignment and
+canonical-event references into the recipient's namespace. The transport header
+supplies the authenticated source peer route and local destination; sender-local
+source IDs, peer-target IDs, and assignment/event reference agreement must match
+before projection. Arbitrary application payloads, event IDs/order, outgoing wire
+bytes, and historical task records are unchanged. Core ownership comparisons stay
+strict. This relies on Wolfpack enforcing its trusted-peer ingress policy; the
+adapter does not authenticate a peer by trusting a payload label.
+
+Delivery ACKs acknowledge one envelope, **not** a cursor prefix. The core now
+tracks observed pending cursor→envelope bindings and a conservative checkpoint in
+endpoint-scoped `relay_state` metadata (existing SQLite schema 5, no migration).
+A later automatic intent ACK cannot advance the checkpoint past an earlier
+unacknowledged assignment. ACK intents are persisted before the request and only
+those requested ACKs are retried on connect/receive after a response loss or
+reopen. They use the durable envelope ID, not a receive-time RAM cache. Pending
+bindings are removed after confirmation; the checkpoint/high-water mark does not
+retain an individual completed-ACK history. Retired endpoint bindings are fenced.
+Existing potentially unsafe checkpoints are **not** silently rewound or repaired.
+
+The in-memory conformance fixture now models individual ACKs too. Optional
+`tests/wolfpack-real-peer-core.test.ts` uses the same explicit trusted Wolfpack
+source/revision variables as the retry test above. It exercises actual adapters,
+cores, SQLite and two current v2 gateways over private loopback HTTP, including ACK
+response loss/reopen, both-direction task messages and canonical/self fanout.
+Broker/topology are synthetic: this is not live Tailnet/auth, compiled-worker,
+physical-device or Pi/model execution proof.
+
+These corrections do **not** activate the memory-owned profile. Negotiated profile/epoch
+binding, actual sparse HTTP delivery cursors, live reset/rebind and terminal
+forwarding outcomes remain outstanding. Endpoint-scoped checkpoints are not a
+substitute for binding the future volatile adapter to its exact relay epoch.
+
 ## delegation workflow
 
 Configure Pi role models with `WOLFPACK_IMPLEMENTER_MODEL` and `WOLFPACK_REVIEWER_MODEL`; they default to `openai-codex/gpt-5.6-terra` and `openai-codex/gpt-5.6-sol`. Explicit user or project choices override those defaults.

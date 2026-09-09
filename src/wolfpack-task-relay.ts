@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { createTaskCore } from "./task-core";
+import { wolfpackEndpointView } from "./wolfpack-endpoint-view";
 import { createTaskStore } from "./task-store";
 import { INVALID_RELAY_METADATA, TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
 import type {
@@ -168,9 +169,12 @@ export function createWolfpackTaskRelay(options: WolfpackTaskRelayOptions = {}):
 			return { deliveries, nextCursor: response.nextCursor, hasMore: response.hasMore || response.envelopes.length > envelopes.length };
 		},
 		async acknowledgeDelivery(input: RelayDeliveryAck, signal?: AbortSignal): Promise<void> {
-			await register(signal);
-			const envelopeId = envelopeIds.get(input.cursor);
-			if (!envelopeId) throw new TaskProtocolError("INVALID_CURSOR", "relay delivery cursor is not available for acknowledgement");
+			const registered = await register(signal);
+			if (!sameEndpoint(input.endpoint, registered)) throw new TaskProtocolError("INVALID_CONNECTION", "delivery acknowledgement belongs to a different endpoint");
+			const cachedId = envelopeIds.get(input.cursor);
+			if (cachedId !== undefined && input.envelopeId !== undefined && cachedId !== input.envelopeId) throw new TaskProtocolError("INVALID_CURSOR", "delivery acknowledgement conflicts with its cursor binding");
+			const envelopeId = input.envelopeId ?? cachedId;
+			if (!nonEmpty(envelopeId)) throw new TaskProtocolError("INVALID_CURSOR", "relay delivery cursor is not available for acknowledgement");
 			await request<WolfpackRelayResponse>(requestFetch, baseUrl, requestTimeoutMs, "POST", "/api/task-relay/v2/delivery-ack", { callerSession: requiredSession(callerSession), envelopeId }, signal);
 			envelopeIds.delete(input.cursor);
 		},
@@ -245,7 +249,7 @@ function fromWolfpackEnvelope(envelope: WolfpackRelayEnvelope): RelayEnvelope {
 	}
 	const taskId = taskIdFromPayload(envelope.payload);
 	const kind = envelopeKindFromPayload(envelope.payload);
-	const payload = JSON.stringify(relayPayload(envelope.payload));
+	const payload = JSON.stringify(wolfpackEndpointView(envelope.source, envelope.target, kind, relayPayload(envelope.payload)));
 	if (payload === undefined) throw new TaskProtocolError("INVALID_PAYLOAD", "Wolfpack relay envelope payload is not JSON-serializable");
 	return { envelopeId: envelope.envelopeId, protocolVersion: TASK_PROTOCOL_VERSION, source: envelope.source, target: envelope.target, taskId, kind, payload };
 }

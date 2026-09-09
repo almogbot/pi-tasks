@@ -31,7 +31,7 @@ export class InMemoryTaskRelay implements TaskRelay {
 	private readonly endpoints = new Map<string, TaskEndpoint>();
 	private readonly mailboxes = new Map<string, MailboxItem[]>();
 	private readonly accepted = new Set<string>();
-	private readonly acknowledged = new Map<string, number>();
+	private readonly acknowledged = new Set<string>();
 	private nextDelivery = 0;
 	private sendFailure = false;
 
@@ -72,11 +72,10 @@ export class InMemoryTaskRelay implements TaskRelay {
 		this.assertEndpoint(input.endpoint);
 		const mailbox = this.mailboxes.get(input.endpoint.id);
 		if (!mailbox) throw new TaskProtocolError("UNREGISTERED_TARGET", "endpoint is not registered for this protocol");
-		const acknowledged = this.acknowledged.get(input.endpoint.id) ?? 0;
 		const cursor = Number(input.cursor);
 		if (!Number.isSafeInteger(cursor) || cursor < 0) throw new TaskProtocolError("INVALID_CURSOR", "relay cursor must be a non-negative integer");
-		const start = Math.max(acknowledged, cursor);
-		const pending = mailbox.filter((item) => Number(item.cursor) > start);
+		const start = cursor;
+		const pending = mailbox.filter((item) => Number(item.cursor) > start && !this.acknowledged.has(item.envelope.envelopeId));
 		const deliveries = pending.slice(0, input.limit);
 		return {
 			deliveries,
@@ -89,7 +88,9 @@ export class InMemoryTaskRelay implements TaskRelay {
 		this.assertEndpoint(input.endpoint);
 		const cursor = Number(input.cursor);
 		if (!Number.isSafeInteger(cursor) || cursor < 0) throw new TaskProtocolError("INVALID_CURSOR", "relay cursor must be a non-negative integer");
-		this.acknowledged.set(input.endpoint.id, Math.max(this.acknowledged.get(input.endpoint.id) ?? 0, cursor));
+		const item = this.mailboxes.get(input.endpoint.id)?.find(item => item.cursor === input.cursor);
+		if (!item) throw new TaskProtocolError("INVALID_CURSOR", "relay delivery is not in this endpoint mailbox");
+		this.acknowledged.add(item.envelope.envelopeId);
 	}
 
 	failNextSend(): void {

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { openSqliteDatabase } from "./sqlite-database";
 import type { SqliteDatabase } from "./sqlite-database";
-import { TERMINAL_INTENT_OPERATION } from "./task-protocol";
+import { TERMINAL_INTENT_OPERATION, TaskProtocolError } from "./task-protocol";
 import type { RelayEnvelope, TaskEndpoint, TaskEvent, TaskRecord, TaskSnapshot, TerminalDeliveryState, TerminalTaskIntentType } from "./task-protocol";
 
 const SCHEMA_VERSION = 5;
@@ -57,6 +57,11 @@ export interface TaskStore {
 	persistInbox(envelope: RelayEnvelope, cursor: string): boolean;
 	getReceiveCursor(): string;
 	setReceiveCursor(cursor: string): void;
+	trackRelayDeliveries(endpoint: TaskEndpoint, deliveries: readonly { readonly cursor: string; readonly envelopeId: string }[]): void;
+	pendingRelayEnvelopeId(endpoint: TaskEndpoint, cursor: string): string | undefined;
+	requestRelayAcknowledgement(endpoint: TaskEndpoint, cursor: string): void;
+	requestedRelayAcknowledgements(endpoint: TaskEndpoint): readonly string[];
+	acknowledgeRelayCursor(endpoint: TaskEndpoint, cursor: string): void;
 	putIntent(intentId: string, taskId: string, envelopeId: string): void;
 	putInsertionReceipt(taskId: string, eventId: string): boolean;
 	reserveTaskOperation(input: TaskOperationRecord): { readonly created: boolean; readonly record: TaskOperationRecord };
@@ -155,6 +160,39 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
 		setReceiveCursor(cursor) {
 			database.query("INSERT INTO relay_state (name, value) VALUES ('receive_cursor', ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value").run(cursor);
 		},
+		trackRelayDeliveries(endpoint, deliveries) {
+			const state = deliveryCheckpoint(endpoint);
+			const priorHighWater = BigInt(state.highWater);
+			for (const delivery of deliveries) {
+				const prior = state.pending[delivery.cursor];
+				if (prior !== undefined && prior !== delivery.envelopeId) throw new TaskProtocolError("INVALID_CURSOR", "relay cursor changed envelope identity");
+				// A previously observed but no longer pending cursor was ACKed. In
+				// particular, legacy relays may still return ACKed rows on reread.
+				if (BigInt(delivery.cursor) > priorHighWater) state.pending[delivery.cursor] = delivery.envelopeId;
+				if (BigInt(delivery.cursor) > BigInt(state.highWater)) state.highWater = delivery.cursor;
+			}
+			writeDeliveryCheckpoint(endpoint, state);
+		},
+		pendingRelayEnvelopeId(endpoint, cursor) { return deliveryCheckpoint(endpoint).pending[cursor]; },
+		requestRelayAcknowledgement(endpoint, cursor) {
+			const state = deliveryCheckpoint(endpoint);
+			if (state.pending[cursor] === undefined) throw new TaskProtocolError("INVALID_CURSOR", "relay delivery is not pending in this endpoint scope");
+			(state.requested ??= {})[cursor] = true;
+			writeDeliveryCheckpoint(endpoint, state);
+		},
+		requestedRelayAcknowledgements(endpoint) { return Object.keys(deliveryCheckpoint(endpoint).requested ?? {}); },
+		acknowledgeRelayCursor(endpoint, cursor) {
+			const state = deliveryCheckpoint(endpoint);
+			// Concurrent confirmations of the same requested ACK are harmless.
+			if (state.pending[cursor] === undefined) return;
+			delete state.pending[cursor];
+			if (state.requested) delete state.requested[cursor];
+			const pending = Object.keys(state.pending);
+			if (pending.length === 0) state.frontier = state.highWater;
+			else if (BigInt(cursor) > BigInt(state.frontier) && pending.every(value => BigInt(value) > BigInt(cursor))) state.frontier = cursor;
+			writeDeliveryCheckpoint(endpoint, state);
+			store.setReceiveCursor(state.frontier);
+		},
 		putIntent(intentId, taskId, envelopeId) {
 			database.query("INSERT INTO intents (intent_id, task_id, envelope_id) VALUES (?, ?, ?) ON CONFLICT(intent_id) DO NOTHING").run(intentId, taskId, envelopeId);
 		},
@@ -185,7 +223,28 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
 		},
 		close() { database.close(); },
 	};
+	function checkpointKey(endpoint: TaskEndpoint): string {
+		const bound = store.getEndpointBinding();
+		if (bound && (bound.relay !== endpoint.relay || bound.id !== endpoint.id)) throw new TaskProtocolError("RELAY_RESET", "delivery checkpoint belongs to a retired endpoint", { retryable: false });
+		return `delivery_checkpoint:${JSON.stringify([endpoint.relay, endpoint.id])}`;
+	}
+	function deliveryCheckpoint(endpoint: TaskEndpoint): DeliveryCheckpoint {
+		const row = database.query("SELECT value FROM relay_state WHERE name = ?").get(checkpointKey(endpoint)) as { readonly value: string } | null;
+		if (row) return JSON.parse(row.value) as DeliveryCheckpoint;
+		const frontier = store.getReceiveCursor();
+		return { frontier, highWater: frontier, pending: {} };
+	}
+	function writeDeliveryCheckpoint(endpoint: TaskEndpoint, state: DeliveryCheckpoint): void {
+		database.query("INSERT INTO relay_state (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value").run(checkpointKey(endpoint), JSON.stringify(state));
+	}
 	return store;
+}
+
+interface DeliveryCheckpoint {
+	frontier: string;
+	highWater: string;
+	pending: Record<string, string>;
+	requested?: Record<string, true>;
 }
 
 interface TaskRow {
