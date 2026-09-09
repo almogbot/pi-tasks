@@ -47,9 +47,14 @@ describe("v2-only package", () => {
 			expect(document).toContain("wolfpack-pi-tasks-v2");
 			expect(document).toContain("{ relay, id }");
 			expect(document).toContain("taskEndpoint");
-			expect(document).not.toMatch(/\b(?:v1|legacy|task-metrics|task board|historical reporting)\b/i);
+			// The volatile-v1 transport and legacy cutover warning are not the removed v1 task runtime.
+			expect(document).not.toMatch(/\b(?:pi-tasks\/v1|v1-compat-extension|legacy-extension|task-metrics|task board|historical reporting)\b/i);
+			expect(document).toContain("volatile-v1");
+			expect(document).toContain("/task-relay-rebind --accept-relay-loss");
+			expect(document).toContain("can lose even accepted mail");
 		}
-		expect(readme).toContain("Wolfpack release exposing the stable");
+		expect(readme).toContain("requires a compatible Wolfpack memory-owned server");
+		expect(readme).toContain("No transport opt-in flag is needed");
 		expect(readme).toContain("`WOLFPACK_SESSION_NAME` resolves the active Pi process to its relay endpoint");
 		expect(`${readme}\n${skill}`).not.toContain("task-gateway.md");
 	});

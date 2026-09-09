@@ -1,5 +1,7 @@
 export { createInMemoryTaskRelay, InMemoryTaskRelay } from "./in-memory-task-relay";
 export { createTaskCore } from "./task-core";
+export { createConfiguredTaskCore } from "./configured-task-core";
+export type { ConfiguredTaskCoreOptions, OwnedTaskCore } from "./configured-task-core";
 export { createTaskStore } from "./task-store";
 export { createVolatileTaskSession, VOLATILE_PROFILE } from "./volatile-task-session";
 export type { VolatileTaskSession, VolatileTaskSessionOptions } from "./volatile-task-session";

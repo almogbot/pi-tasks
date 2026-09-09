@@ -4,7 +4,9 @@
 
 ## endpoint-owned relay
 
-The default extension uses the configured local Wolfpack relay, never the in-memory conformance relay. It registers an opaque endpoint with `POST /api/task-relay/v2/connect`, stores task state at the deterministic per-session path `~/.pi/tasks/v2/sessions/<sha256(WOLFPACK_SESSION_NAME)>/tasks.sqlite`, and exchanges opaque relay envelopes through Wolfpack. The adapter requires a Wolfpack release exposing the stable [relay v2 control-api contract](https://github.com/almogdepaz/wolfpack/blob/main/docs/control-api-schema.md#pi-tasks-relay-v2-boundary).
+The default extension uses the memory-owned local Wolfpack relay, never the in-memory conformance fixture or a silent legacy fallback. It negotiates `volatile-v1` at `POST /api/task-relay/volatile-v1`, and keeps endpoint task state at `~/.pi/tasks/v2/sessions/<sha256(WOLFPACK_SESSION_NAME)>/tasks.sqlite`. No transport opt-in flag is needed.
+
+**Coordinated cutover branch, not a released installation:** this extension requires a compatible Wolfpack memory-owned server. Server default selection, discovery/readiness, verified federation, packaged release and installed rollout must be coordinated before publication as a normal release. An old/durable server is refused, not silently adopted.
 
 Set `WOLFPACK_SESSION_NAME` for every Pi process. The adapter uses `WOLFPACK_PORT` when the local control port differs from `18790`; `WOLFPACK_SESSION_NAME` resolves the active Pi process to its relay endpoint. After the target extension registers, run `wolfpack session status <session> --json` and read its `taskEndpoint`. Pass that opaque `{ relay, id }` value unchanged; do not derive it from a session name, broker ID, terminal label, output, or prose.
 
@@ -22,7 +24,7 @@ Set `WOLFPACK_SESSION_NAME` for every Pi process. The adapter uses `WOLFPACK_POR
 
 The `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. Unsupported fields are rejected before persistence: a pre-persistence validation rejection creates no task. If creation status is uncertain after a transport failure, idempotency remains necessary; inspect the structured task ID rather than creating an unrelated replacement.
 
-Wolfpack owns durable mailbox delivery and peer forwarding; Pi owns lifecycle, logical event order, receipts, and local SQLite state. `agent_task_send` returns after relay acceptance only, not Pi insertion or model execution. The receiver inserts model-visible events as structured `pi-tasks-event` custom messages through Pi's safe `deliverAs: "followUp"` queue and records structured `{ taskId, eventId }` insertion evidence. Replay after Pi has structurally recorded an event cannot create another logical receipt. `createInMemoryTaskRelay` remains exported solely as a deterministic conformance fixture.
+Wolfpack owns bounded in-memory mailbox delivery and destination-confirmed forwarding; a relay restart can lose even accepted mail. Pi owns lifecycle, logical event order, receipts, and local SQLite history; that history is not relay recovery. `agent_task_send` returns after relay acceptance only, not Pi insertion or model execution. The receiver inserts model-visible events as structured `pi-tasks-event` custom messages through Pi's safe `deliverAs: "followUp"` queue and records structured `{ taskId, eventId }` insertion evidence. Replay after Pi has structurally recorded an event cannot create another logical receipt. `createInMemoryTaskRelay` remains exported solely as a deterministic conformance fixture.
 
 ## retry-content stability (0.1.9)
 
@@ -100,18 +102,30 @@ response loss/reopen, both-direction task messages and canonical/self fanout.
 Broker/topology are synthetic: this is not live Tailnet/auth, compiled-worker,
 physical-device or Pi/model execution proof.
 
-These corrections alone do **not** activate the memory-owned profile. The
-experimental session below stages profile/epoch binding, sparse cursors and
-reset/rebind separately. The default adapter's existing cursor/forwarding
-assumptions and production cutover remain unchanged.
+Those 0.1.9 corrections alone did not activate the memory-owned profile. This
+cutover branch now uses the session below in the normal extension lifecycle.
 
-## experimental memory-owned transport session
+## memory-owned transport lifecycle
 
-`createVolatileTaskSession({ url, callerSession, store })` is an explicit,
-programmatic opt-in for the staged Wolfpack transport. The URL must be an
-explicitly trusted HTTPS or loopback endpoint ingress. **No production route is
-mounted by this package, and the default extension/factory remains on its current
-transport.** Do not point this at an installed server expecting automatic fallback.
+`createConfiguredTaskCore()` owns the normal transport and its SQLite store.
+Startup connects, the extension polls every five seconds and at agent settlement,
+and shutdown fences new work, aborts transport requests, waits for active core
+calls to settle, then closes SQLite. Late setup cannot resurrect a stopped
+lifecycle. A fresh start reopens the persisted binding, not an indefinitely cached
+core. Shutdown does not claim remote delivery or ACKs; the remote lease expires
+without renewal.
+
+After a relay reset (or upgrade from an existing legacy endpoint), task tools stay
+stopped and the status points to `/task-relay-rebind`. Run it without arguments to
+read the loss warning. Only `/task-relay-rebind --accept-relay-loss` explicitly
+retires the old scope and binds a fresh endpoint. Pending old-source work is
+quarantined; accepted/history records remain unchanged. This command cannot
+recover accepted mail, adopt historical tasks or rearm exhausted envelope IDs.
+Inspect unresolved work first. Automatic polling never invokes rebind.
+
+`createVolatileTaskSession({ url, callerSession, store })` remains the lower-level
+API for caller-owned stores. The URL must be explicitly trusted HTTPS or loopback
+endpoint ingress. Neither factory falls back to a different transport.
 
 - `connect()` negotiates and durably binds profile, epoch, endpoint, generation,
   caller and URL before exposing a task core. A matching process reopen renews the
@@ -145,7 +159,7 @@ quarantine its work. This is not an exclusive cross-process broker-registration
 lease; a racing registration can still force an explicit reset on a subsequent
 operation. No availability or task recovery across such races is promised.
 
-Profile-bound stores cannot silently reopen through the default factory. Delivery
+Profile-bound stores cannot silently reopen through the legacy `createWolfpackTaskCore` factory. Delivery
 checkpoints are now scoped by profile/epoch as well as endpoint. These are metadata
 in the existing endpoint SQLite store, not relay recovery storage or a schema
 migration. No terminal input, installed extension, provider, broker or service is
@@ -158,7 +172,11 @@ sparse ACK gaps, ACK response loss/reopen, worker epoch replacement, durable res
 and explicit rebind. HTTP ingress and broker/topology are private fixtures: this
 is not production auth/discovery/schema, compiled release packaging, physical
 Tailnet or Pi/model execution proof. Production cutover and full-path performance
-measurements remain separate work.
+measurements remain separate work. `tests/volatile-extension-worker.test.ts` also
+uses the pinned source variables to run normal default extension hooks/tools and
+explicit rebind against a real memory worker with a private HTTP/broker fixture.
+It checks shutdown/reopen, actual insertion/ACK, epoch reset and preserved history;
+it is not a real Pi process/model or production HTTP-auth test.
 
 ## delegation workflow
 

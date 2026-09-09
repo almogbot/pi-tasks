@@ -14,7 +14,7 @@ test("default extension uses the configured Wolfpack relay adapter rather than a
 	const previousSession = process.env.WOLFPACK_SESSION_NAME;
 	delete process.env.WOLFPACK_SESSION_NAME;
 	const tools: Record<string, Tool> = {};
-	piTasks({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI);
+	piTasks({ on: () => undefined, registerCommand: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI);
 
 	const result = await tools.agent_task_send!.execute("call", { to: { relay: "wolfpack-pi-tasks-v2", id: "opaque" }, task: "implement" }, new AbortController().signal, undefined, {});
 

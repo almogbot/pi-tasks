@@ -5,7 +5,7 @@ description: Use when opening, selecting, delegating to, checking, or cleaning u
 
 # wolfpack pi task delegation
 
-use `wolfpack-tailnet-control` for session control. this skill covers endpoint-owned v2 task lifecycle, structured handoffs, and parent verification. The package default is the v2 extension described by Wolfpack's [relay v2 control-api contract](https://github.com/almogdepaz/wolfpack/blob/main/docs/control-api-schema.md#pi-tasks-relay-v2-boundary).
+use `wolfpack-tailnet-control` for session control. this skill covers endpoint-owned v2 task lifecycle, structured handoffs, and parent verification. The cutover package default uses the epoch-bound `volatile-v1` transport with the unchanged `pi-tasks/v2` task protocol. It requires a coordinated compatible Wolfpack server; an old server is refused, never silently adopted.
 
 ## choose one assignment mode
 
@@ -80,7 +80,9 @@ Assignment completion ends the assigned task, not the reusable role session. Whe
 
 ## v2 delivery and recovery
 
-Wolfpack v2 is a content-blind relay; each Pi endpoint owns task lifecycle, canonical event order, receipts, and SQLite state. Relay acceptance does not prove model execution. The receiver inserts model-visible events as structured `pi-tasks-event` custom messages with Pi's safe `deliverAs: "followUp"` queue, then records insertion through structured `{ taskId, eventId }` evidence. Restart recovery reads durable session entries and local task state; it never parses rendered prompts or terminal prose.
+Wolfpack v2 is a content-blind relay; each Pi endpoint owns task lifecycle, canonical event order, receipts, and SQLite state. Relay acceptance does not prove model execution. The receiver inserts model-visible events as structured `pi-tasks-event` custom messages with Pi's safe `deliverAs: "followUp"` queue, then records insertion through structured `{ taskId, eventId }` evidence. Pi insertion recovery reads durable session entries and local task state; it never parses rendered prompts or terminal prose. Relay mail is memory-owned: a relay restart can lose even accepted mail, and endpoint history is not relay recovery.
+
+A reset or existing legacy endpoint requires explicit owner action. `/task-relay-rebind` explains the loss boundary; `/task-relay-rebind --accept-relay-loss` binds a fresh endpoint only after the operator accepts it. Pending old-source work is quarantined unchanged and historical tasks are not adopted. Never invoke rebind as an automatic retry or claim an unresolved task was recovered. Do not silently reassign possibly delivered work.
 
 Receiver terminal submission has one task-wide logical identity. Same-status retries reuse it; a conflicting terminal status fails closed. Canonical status remains origin-owned, while `terminalDelivery` separately exposes `not_submitted`, `pending`, `accepted`, or `delivery_blocked`. Parent acknowledgment is terminal-only and retries reuse one logical event and stable envelope identities.
 
@@ -93,4 +95,4 @@ Set `PI_TASK_WORKER=1` only for task-only workers. Before a valid structured ass
 - do not steer or interrupt an active Pi turn with task context; use the adapter's follow-up queue.
 - Do not copy plans, source contents, or transcripts into task context.
 - do not derive or transform opaque endpoint IDs.
-- do not promise JWT federation, artifact byte transfer, exactly-once model execution, or successor endpoint rebinding.
+- do not promise JWT federation, artifact byte transfer, exactly-once model execution, or migration of historical tasks to successor endpoints.

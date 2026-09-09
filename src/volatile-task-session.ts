@@ -28,7 +28,7 @@ export interface VolatileTaskSession {
   close(): void;
 }
 
-/** Programmatic opt-in only; not wired into the extension or default v2 factory. */
+/** Epoch-bound transport used by the normal extension; caller owns the store. */
 export function createVolatileTaskSession(options: VolatileTaskSessionOptions): VolatileTaskSession {
   const url = new URL(options.url);
   if (url.username || url.password || url.search || url.hash || !(url.protocol === "https:" || (url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)))) throw new TypeError("explicit trusted HTTPS or loopback relay URL required");
