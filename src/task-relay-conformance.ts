@@ -22,7 +22,7 @@ export function runTaskRelayConformance(createRelay: () => TaskRelay): void {
 		await relay.connect({ endpoint: source, protocolVersion: TASK_PROTOCOL_VERSION, receiveCursor: "0" });
 		await relay.connect({ endpoint: target, protocolVersion: TASK_PROTOCOL_VERSION, receiveCursor: "0" });
 		await expect(relay.resolve({ relay: relay.id, reference: "missing" })).rejects.toThrow("not registered");
-		const envelope = { envelopeId: "envelope-1", protocolVersion: TASK_PROTOCOL_VERSION, source, target, taskId: "task-1", kind: "assignment" as const, payload: "{}" };
+		const envelope = { envelopeId: "envelope-1", protocolVersion: TASK_PROTOCOL_VERSION, source, target, taskId: "task-1", kind: "assignment" as const, payload: "{}", createdAt: new Date(0).toISOString() };
 		await relay.send(envelope);
 		await relay.send(envelope);
 		const page = await relay.receive({ endpoint: target, cursor: "0", limit: 10 });
