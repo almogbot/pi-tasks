@@ -24,6 +24,87 @@ The `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. 
 
 Wolfpack owns durable mailbox delivery and peer forwarding; Pi owns lifecycle, logical event order, receipts, and local SQLite state. `agent_task_send` returns after relay acceptance only, not Pi insertion or model execution. The receiver inserts model-visible events as structured `pi-tasks-event` custom messages through Pi's safe `deliverAs: "followUp"` queue and records structured `{ taskId, eventId }` insertion evidence. Replay after Pi has structurally recorded an event cannot create another logical receipt. `createInMemoryTaskRelay` remains exported solely as a deterministic conformance fixture.
 
+## retry-content stability (unreleased correction)
+
+New core-originated internal `RelayEnvelope` records persist an immutable ISO
+`createdAt` alongside their outbox payload, before relay submission. Assignment,
+intent and canonical-event envelopes all use that stored value on every Wolfpack
+send, including after adapter/core/store restart. This is **not** a new
+`agent_task_send` tool argument or a change to canonical task event authority.
+The existing outbox serialization owns the metadata; no new database/schema or
+relay spool is introduced. Wolfpack still hashes the full wire envelope, including
+its timestamp: genuinely changed timestamp or payload must continue to conflict.
+
+**Upgrade caveat:** pending envelopes written by older versions have no original
+wire timestamp. The old adapter generated it on each attempt, so neither a new
+wall-clock value nor an in-memory cache can reconstruct an already accepted
+request safely. Missing/invalid metadata now fails before any relay request with
+non-retryable `INVALID_RELAY_METADATA`; the core quarantines that pending envelope
+unchanged using its existing delivery-blocked mechanism. Already accepted outbox
+records and canonical task status are not rewritten. Inspect affected work and
+its possibly-accepted outcome before choosing an explicit replacement; do not
+blindly mint a new identity or silently backfill timestamps. Existing endpoint
+rotation handling remains separate.
+
+This correction alone does not activate Wolfpack's memory-owned transport. Sparse
+cursor negotiation, live-process epoch reset and volatile forwarding outcomes
+still require coordinated changes with Wolfpack #351; old forwarding acceptance
+and cursor assumptions are not claimed fixed here.
+
+### real-relay retry regression
+
+The ordinary tests use private fixtures. An optional cross-repository test also
+runs the real core and adapter against a privately rooted real Wolfpack gateway
+over loopback HTTP, loses a response after acceptance, reopens the endpoint store
+and recreates the adapter, then verifies duplicate acceptance and genuine content
+conflicts. Select a trusted, tracked-clean Wolfpack checkout and exact revision:
+
+```bash
+PI_TASKS_WOLFPACK_SOURCE=/absolute/wolfpack-checkout \
+PI_TASKS_WOLFPACK_REVISION=<full-commit-id> \
+bun test tests/wolfpack-real-relay-retry.test.ts
+```
+
+Without that explicit source selection the cross-repository test is skipped.
+It does not contact an installed server, live broker or Tailnet peer, and is not
+an end-to-end Pi/model execution, two-host, or volatile-profile test.
+
+## endpoint-view and delivery-checkpoint corrections (unreleased)
+
+Peer relay aliases are local routing names, not globally portable endpoint
+identities. On receipt, the adapter projects only protocol-defined assignment and
+canonical-event references into the recipient's namespace. The transport header
+supplies the authenticated source peer route and local destination; sender-local
+source IDs, peer-target IDs, and assignment/event reference agreement must match
+before projection. Arbitrary application payloads, event IDs/order, outgoing wire
+bytes, and historical task records are unchanged. Core ownership comparisons stay
+strict. This relies on Wolfpack enforcing its trusted-peer ingress policy; the
+adapter does not authenticate a peer by trusting a payload label.
+
+Delivery ACKs acknowledge one envelope, **not** a cursor prefix. The core now
+tracks observed pending cursor→envelope bindings and a conservative checkpoint in
+endpoint-scoped `relay_state` metadata (existing SQLite schema 5, no migration).
+A later automatic intent ACK cannot advance the checkpoint past an earlier
+unacknowledged assignment. ACK intents are persisted before the request and only
+those requested ACKs are retried on connect/receive after a response loss or
+reopen. They use the durable envelope ID, not a receive-time RAM cache. Pending
+bindings are removed after confirmation; the checkpoint/high-water mark does not
+retain an individual completed-ACK history. Retired endpoint bindings are fenced.
+Existing potentially unsafe checkpoints are **not** silently rewound or repaired.
+
+The in-memory conformance fixture now models individual ACKs too. Optional
+`tests/wolfpack-real-peer-core.test.ts` uses the same explicit trusted Wolfpack
+source/revision variables as the retry test above. It exercises actual adapters,
+cores, SQLite and two current v2 gateways over private loopback HTTP, including ACK
+response loss/reopen, both-direction task messages and canonical/self fanout.
+Broker/topology are synthetic: this is not live Tailnet/auth, compiled-worker,
+physical-device or Pi/model execution proof.
+
+These corrections do **not** activate the memory-owned profile. Negotiated profile/epoch
+binding, actual sparse HTTP delivery cursors, live reset/rebind and terminal
+forwarding outcomes remain outstanding. Endpoint-scoped checkpoints are not a
+substitute for binding the future volatile adapter to its exact relay epoch.
+
 ## delegation workflow
 
 Configure Pi role models with `WOLFPACK_IMPLEMENTER_MODEL` and `WOLFPACK_REVIEWER_MODEL`; they default to `openai-codex/gpt-5.6-terra` and `openai-codex/gpt-5.6-sol`. Explicit user or project choices override those defaults.

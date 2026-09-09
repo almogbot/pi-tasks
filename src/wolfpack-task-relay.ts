@@ -3,8 +3,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { createTaskCore } from "./task-core";
+import { wolfpackEndpointView } from "./wolfpack-endpoint-view";
 import { createTaskStore } from "./task-store";
-import { TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
+import { INVALID_RELAY_METADATA, TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
 import type {
 	RelayAcceptance,
 	RelayConnectInput,
@@ -139,10 +140,13 @@ export function createWolfpackTaskRelay(options: WolfpackTaskRelayOptions = {}):
 			return response.endpoint;
 		},
 		async send(input: RelayEnvelope, signal?: AbortSignal): Promise<RelayAcceptance> {
+			// Validate/capture before registration or any send. A fresh timestamp or
+			// process-local cache cannot safely retry a previously accepted envelope.
+			const envelope = toWolfpackEnvelope(input);
 			await register(signal);
 			const response = await request<WolfpackSendResponse>(requestFetch, baseUrl, requestTimeoutMs, "POST", "/api/task-relay/v2/send", {
 				callerSession: requiredSession(callerSession),
-				envelope: toWolfpackEnvelope(input),
+				envelope,
 			}, signal);
 			if (!nonEmpty(response.acceptanceId)) throw new TaskProtocolError("INVALID_ACCEPTANCE", "Wolfpack relay returned an invalid acceptance");
 			return { envelopeId: input.envelopeId };
@@ -165,9 +169,12 @@ export function createWolfpackTaskRelay(options: WolfpackTaskRelayOptions = {}):
 			return { deliveries, nextCursor: response.nextCursor, hasMore: response.hasMore || response.envelopes.length > envelopes.length };
 		},
 		async acknowledgeDelivery(input: RelayDeliveryAck, signal?: AbortSignal): Promise<void> {
-			await register(signal);
-			const envelopeId = envelopeIds.get(input.cursor);
-			if (!envelopeId) throw new TaskProtocolError("INVALID_CURSOR", "relay delivery cursor is not available for acknowledgement");
+			const registered = await register(signal);
+			if (!sameEndpoint(input.endpoint, registered)) throw new TaskProtocolError("INVALID_CONNECTION", "delivery acknowledgement belongs to a different endpoint");
+			const cachedId = envelopeIds.get(input.cursor);
+			if (cachedId !== undefined && input.envelopeId !== undefined && cachedId !== input.envelopeId) throw new TaskProtocolError("INVALID_CURSOR", "delivery acknowledgement conflicts with its cursor binding");
+			const envelopeId = input.envelopeId ?? cachedId;
+			if (!nonEmpty(envelopeId)) throw new TaskProtocolError("INVALID_CURSOR", "relay delivery cursor is not available for acknowledgement");
 			await request<WolfpackRelayResponse>(requestFetch, baseUrl, requestTimeoutMs, "POST", "/api/task-relay/v2/delivery-ack", { callerSession: requiredSession(callerSession), envelopeId }, signal);
 			envelopeIds.delete(input.cursor);
 		},
@@ -214,6 +221,12 @@ function bindRegisteredEndpoint(store: TaskStore, endpoint: TaskEndpoint, now: n
 }
 
 function toWolfpackEnvelope(envelope: RelayEnvelope): WolfpackRelayEnvelope {
+	const createdAt = envelope.createdAt;
+	if (!transportTimestamp(createdAt)) {
+		throw new TaskProtocolError(INVALID_RELAY_METADATA, "relay envelope requires an immutable persisted creation timestamp; legacy wire metadata cannot be reconstructed safely", {
+			retryable: false, details: { envelopeId: envelope.envelopeId, reason: createdAt === undefined ? "missing" : "invalid" },
+		});
+	}
 	let payload: unknown;
 	try {
 		payload = JSON.parse(envelope.payload) as unknown;
@@ -226,7 +239,7 @@ function toWolfpackEnvelope(envelope: RelayEnvelope): WolfpackRelayEnvelope {
 		source: envelope.source,
 		target: envelope.target,
 		payload: { taskId: envelope.taskId, kind: envelope.kind, payload },
-		createdAt: new Date().toISOString(),
+		createdAt,
 	};
 }
 
@@ -236,7 +249,7 @@ function fromWolfpackEnvelope(envelope: WolfpackRelayEnvelope): RelayEnvelope {
 	}
 	const taskId = taskIdFromPayload(envelope.payload);
 	const kind = envelopeKindFromPayload(envelope.payload);
-	const payload = JSON.stringify(relayPayload(envelope.payload));
+	const payload = JSON.stringify(wolfpackEndpointView(envelope.source, envelope.target, kind, relayPayload(envelope.payload)));
 	if (payload === undefined) throw new TaskProtocolError("INVALID_PAYLOAD", "Wolfpack relay envelope payload is not JSON-serializable");
 	return { envelopeId: envelope.envelopeId, protocolVersion: TASK_PROTOCOL_VERSION, source: envelope.source, target: envelope.target, taskId, kind, payload };
 }
@@ -311,6 +324,12 @@ function requiredSession(sessionName: string | undefined): string {
 
 function boundedRequestTimeout(value: number): number {
 	return Number.isInteger(value) && value >= 1 && value <= MAX_REQUEST_TIMEOUT_MS ? value : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+function transportTimestamp(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
 function futureTimestamp(value: unknown): value is string {
