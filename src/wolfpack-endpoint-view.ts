@@ -1,8 +1,8 @@
 import { TaskProtocolError } from "./task-protocol";
 import type { RelayEnvelope, TaskEndpoint } from "./task-protocol";
 
-const LOCAL = "wolfpack-pi-tasks-v2";
-const PEER = /^wolfpack-pi-tasks-v2:peer:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const WOLFPACK_TASK_RELAY_ID = "wolfpack-pi-tasks-v2";
+const PEER = new RegExp(`^${WOLFPACK_TASK_RELAY_ID}:peer:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, "i");
 
 /**
  * Project only protocol-defined references from the sender's local namespace
@@ -11,11 +11,11 @@ const PEER = /^wolfpack-pi-tasks-v2:peer:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3
  * Outgoing wire bytes, opaque application payloads and historical rows stay put.
  */
 export function wolfpackEndpointView(source: TaskEndpoint, target: TaskEndpoint, kind: RelayEnvelope["kind"], payload: unknown): unknown {
-  if (source.relay === LOCAL && target.relay === LOCAL) return payload; // Includes origin/self canonical fanout.
-  if (!PEER.test(source.relay) || target.relay !== LOCAL) invalid();
+  if (source.relay === WOLFPACK_TASK_RELAY_ID && target.relay === WOLFPACK_TASK_RELAY_ID) return payload; // Includes origin/self canonical fanout.
+  if (!PEER.test(source.relay) || target.relay !== WOLFPACK_TASK_RELAY_ID) invalid();
   if (kind === "intent") return payload; // Intents carry no protocol endpoint references.
   if (!record(payload)) invalid();
-  const originalSource = { relay: LOCAL, id: source.id };
+  const originalSource = { relay: WOLFPACK_TASK_RELAY_ID, id: source.id };
   const validateSource = (value: unknown): void => {
     if (!endpoint(value) || !same(value, originalSource)) invalid();
   };
