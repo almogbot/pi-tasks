@@ -6,6 +6,7 @@ import { isAbsolute, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piTasks from "../src/extension";
 import { createTaskStore } from "../src/task-store";
+import { createConfiguredTaskCore, type OwnedTaskCore } from "../src/configured-task-core";
 import { wolfpackTaskStorePath } from "../src/wolfpack-task-relay";
 
 const wolfpack = process.env.PI_TASKS_WOLFPACK_SOURCE, revision = process.env.PI_TASKS_WOLFPACK_REVISION;
@@ -33,6 +34,7 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
   const makeWorker = () => new WorkerRelayGateway({ profile: "volatile-v1", root: join(root, "relay"),
     inspectSession: async (selector: string) => ({ ok: true, session: selector, sessionId: selector, projectPath: root, harness: "pi", alive: true }) });
   let worker = makeWorker();
+  let peerCore: OwnedTaskCore | undefined;
   const frames: any[] = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     expect(new URL(request.url).pathname).toBe("/api/task-relay/volatile-v1");
@@ -64,12 +66,18 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
     await events.agent_settled!({}, context);
     expect(messages.length).toBeGreaterThan(0);
     expect(frames.some(frame => frame.operation === "acknowledge")).toBe(true);
-    const acknowledgements = frames.filter(frame => frame.operation === "acknowledge").length;
-    const message = await tools.agent_task_message.execute("self-intent", { taskId: result.details.taskId, type: "information", message: "exercise intent ACK through the owned core receiver" }, undefined);
-    expect(message.isError).not.toBe(true);
+    // A self-task can reduce intents locally and miss a dropped method receiver.
+    // Use a distinct configured endpoint so the parent must process a wire intent.
+    peerCore = await createConfiguredTaskCore({ sessionName: "fixture-peer", baseUrl: server.url.origin, path: join(root, "peer.sqlite") });
+    const remote = await tools.agent_task_send.execute("peer-task", { to: peerCore.endpoint, task: "exercise wire intent ACK through the owned core receiver", timeoutMs: 60_000 }, undefined);
+    expect(remote.isError).not.toBe(true);
+    await peerCore.receive();
+    await peerCore.submitIntent({ taskId: remote.details.taskId, type: "task.completed", payload: { summary: "completed by distinct endpoint" } });
     await events.agent_settled!({}, context);
     expect(statuses.at(-1)).toBeUndefined();
-    expect(frames.filter(frame => frame.operation === "acknowledge").length).toBeGreaterThan(acknowledgements);
+    await peerCore.receive();
+    expect(peerCore.getTask(remote.details.taskId)?.status).toBe("completed");
+    await peerCore.close();
     await events.session_shutdown!({}, context);
     const calls = frames.length;
     await events.agent_end!({}, context); await events.agent_settled!({}, context);
@@ -95,6 +103,7 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
     expect(statuses.at(-1)).toBeUndefined();
   } finally {
     await events.session_shutdown?.({}, context);
+    await peerCore?.close();
     await server.stop(true); await worker.close();
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     rmSync(root, { recursive: true, force: true });
