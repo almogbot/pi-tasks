@@ -1,13 +1,11 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piTasks from "../src/extension";
-import { createTaskStore } from "../src/task-store";
 import { createConfiguredTaskCore, type OwnedTaskCore } from "../src/configured-task-core";
-import { wolfpackTaskStorePath } from "../src/wolfpack-task-relay";
 
 const wolfpack = process.env.PI_TASKS_WOLFPACK_SOURCE, revision = process.env.PI_TASKS_WOLFPACK_REVISION;
 
@@ -35,11 +33,12 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
     inspectSession: async (selector: string) => ({ ok: true, session: selector, sessionId: selector, projectPath: root, harness: "pi", alive: true }) });
   let worker = makeWorker();
   let peerCore: OwnedTaskCore | undefined;
-  const frames: any[] = [];
+  const frames: any[] = [], registrations: any[] = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     expect(new URL(request.url).pathname).toBe("/api/task-relay/volatile-v1");
-    const body = await request.json(); frames.push(body);
+    const body = await request.json() as Record<string, unknown>; frames.push(body);
     const result = await worker.volatile(body);
+    if (body.operation === "connect" && result.ok) registrations.push({ caller: body.callerSession, epoch: result.epoch, endpoint: result.value.endpoint });
     return Response.json(result, { status: result.ok ? 200 : 409 });
   } });
   const events: Record<string, (event: any, context: any) => any> = {}, tools: Record<string, any> = {}, commands: Record<string, any> = {};
@@ -57,10 +56,9 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
     process.env.WOLFPACK_PORT = String(server.port); process.env.WOLFPACK_SESSION_NAME = "fixture-extension"; delete process.env.PI_TASK_WORKER;
     piTasks(api);
     await events.session_start!({}, context);
-    const path = wolfpackTaskStorePath("fixture-extension");
-    expect(path.startsWith(process.env.PI_TASKS_EXTENSION_FIXTURE_HOME! + "/")).toBe(true);
-    let store = createTaskStore({ path }); const prior = store.getRelayTransportBinding()!; store.close();
-    expect(prior.profile).toBe("volatile-v1"); expect(statuses.at(-1)).toBeUndefined();
+    const prior = registrations.at(-1)!;
+    expect(prior.caller).toBe("fixture-extension"); expect(statuses.at(-1)).toBeUndefined();
+    expect(existsSync(join(process.env.HOME!, ".pi", "tasks"))).toBe(false);
     const result = await tools.agent_task_send.execute("test", { to: prior.endpoint, task: "historical self task", timeoutMs: 60_000 }, undefined);
     expect(result.details.taskId).toBeString();
     await events.agent_settled!({}, context);
@@ -68,7 +66,7 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
     expect(frames.some(frame => frame.operation === "acknowledge")).toBe(true);
     // A self-task can reduce intents locally and miss a dropped method receiver.
     // Use a distinct configured endpoint so the parent must process a wire intent.
-    peerCore = await createConfiguredTaskCore({ sessionName: "fixture-peer", baseUrl: server.url.origin, path: join(root, "peer.sqlite") });
+    peerCore = await createConfiguredTaskCore({ sessionName: "fixture-peer", baseUrl: server.url.origin });
     const remote = await tools.agent_task_send.execute("peer-task", { to: peerCore.endpoint, task: "exercise wire intent ACK through the owned core receiver", timeoutMs: 60_000 }, undefined);
     expect(remote.isError).not.toBe(true);
     await peerCore.receive();
@@ -83,23 +81,22 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
     await events.agent_end!({}, context); await events.agent_settled!({}, context);
     expect(frames).toHaveLength(calls);
     await events.session_start!({}, context);
-    store = createTaskStore({ path }); expect(store.getRelayTransportBinding()).toEqual(prior); store.close();
+    expect(registrations.at(-1).endpoint).not.toEqual(prior.endpoint);
+    expect(messages.some(message => message.details?.taskId === result.details.taskId)).toBe(true);
     await worker.close(); worker = makeWorker(); await worker.initialize();
     await events.agent_settled!({}, context);
     expect(statuses.at(-1)).toContain("relay reset");
-    await events.session_shutdown!({}, context); await events.session_start!({}, context);
     const resetCalls = frames.length;
     expect(statuses.at(-1)).toContain("relay reset");
     await commands["task-relay-rebind"].handler("", context);
     expect(frames).toHaveLength(resetCalls); expect(notifications.at(-1)).toContain("can lose accepted mail");
     await commands["task-relay-rebind"].handler("--accept-relay-loss", context);
-    store = createTaskStore({ path });
-    expect(store.getRelayTransportBinding()!.epoch).not.toBe(prior.epoch);
-    expect(store.getRelayTransportBinding()!.endpoint).not.toEqual(prior.endpoint);
-    expect(store.listTasks().some(task => task.taskId === result.details.taskId)).toBe(true);
-    store.close();
+    expect(registrations.at(-1).epoch).not.toBe(prior.epoch);
+    expect(registrations.at(-1).endpoint).not.toEqual(prior.endpoint);
+    expect(messages.some(message => message.details?.taskId === result.details.taskId)).toBe(true);
+    expect(existsSync(join(process.env.HOME!, ".pi", "tasks"))).toBe(false);
     const historical = await tools.agent_task_message.execute("old", { taskId: result.details.taskId, type: "information", message: "must not adopt" }, undefined);
-    expect(historical.details.error.code).toBe("NOT_PARTICIPANT");
+    expect(historical.details.error.code).toBe("UNKNOWN_TASK");
     expect(statuses.at(-1)).toBeUndefined();
   } finally {
     await events.session_shutdown?.({}, context);

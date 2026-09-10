@@ -37,7 +37,7 @@ afterEach(() => {
 
 test("activated workers fail closed before assignment while exact opt-out sessions remain unchanged", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const worker = createTaskCore({ endpoint: WORKER, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("worker") });
+	const worker = createTaskCore({ endpoint: WORKER, relay, store: createTaskStore(), ids: sequence("worker") });
 	const gate = registerGate(worker, "1");
 
 	let executions = 0;
@@ -114,13 +114,13 @@ test("only structured assignment evidence matching a local active worker task op
 	expect(await call(gate, "read", { path: "README.md" }, [terminalOnly, terminalOnly])).toEqual({ block: true, reason: DENIAL_CODE });
 });
 
-test("restored assignment history reopens only after a file-backed active-task restart", async () => {
+test("restored session history cannot reopen the worker gate after endpoint RAM loss", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-worker-gate-");
 	temporaryDirectories.push(directory);
 	const path = join(directory, "tasks.sqlite");
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const workerStore = createTaskStore({ path });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const workerStore = createTaskStore();
 	const worker = createTaskCore({ endpoint: WORKER, relay, store: workerStore, ids: sequence("worker") });
 	await origin.connect();
 	await worker.connect();
@@ -129,11 +129,11 @@ test("restored assignment history reopens only after a file-backed active-task r
 	const assignment = assignmentEntry(worker, created.taskId);
 	workerStore.close();
 
-	const restartedStore = createTaskStore({ path });
+	const restartedStore = createTaskStore();
 	const restarted = createTaskCore({ endpoint: WORKER, relay, store: restartedStore, ids: sequence("restart") });
 	const restartedGate = registerGate(restarted, "1");
-	expect(await call(restartedGate, "bash", { command: "pwd" }, [assignment])).toBeUndefined();
-	restartedStore.setStatus(created.taskId, "completed");
+	expect(restarted.listTasks()).toEqual([]);
+	expect(restarted.getTask(created.taskId)).toBeUndefined();
 	expect(await call(restartedGate, "bash", { command: "pwd" }, [assignment])).toEqual({ block: true, reason: DENIAL_CODE });
 	restartedStore.close();
 });
@@ -141,8 +141,8 @@ test("restored assignment history reopens only after a file-backed active-task r
 test("delivery-blocked terminal state survives gate restart and permits only its done retry", async () => {
 	const relayState = { blockOrigin: false };
 	const relay = expiringOriginRelay(relayState);
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const worker = createTaskCore({ endpoint: WORKER, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("worker") });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const worker = createTaskCore({ endpoint: WORKER, relay, store: createTaskStore(), ids: sequence("worker") });
 	await origin.connect();
 	await worker.connect();
 	const created = await origin.createTask({ target: WORKER, task: "blocked terminal", timeoutMs: 1_000 });
@@ -206,8 +206,8 @@ async function runTool(handler: ToolCallHandler, toolName: string, input: unknow
 
 async function assignedFixture(taskCount: number): Promise<{ readonly origin: TaskCore; readonly worker: TaskCore; readonly workerStore: ReturnType<typeof createTaskStore>; readonly taskIds: readonly string[] }> {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const workerStore = createTaskStore({ path: ":memory:" });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const workerStore = createTaskStore();
 	const worker = createTaskCore({ endpoint: WORKER, relay, store: workerStore, ids: sequence("worker") });
 	await origin.connect();
 	await worker.connect();

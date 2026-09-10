@@ -1,9 +1,7 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { createTaskStore } from "../src/task-store";
 import { createVolatileTaskSession, VOLATILE_PROFILE } from "../src/volatile-task-session";
 import { TASK_PROTOCOL_VERSION } from "../src/task-protocol";
-import { createWolfpackTaskCore } from "../src/wolfpack-task-relay";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +13,7 @@ const nextEndpoint = { ...endpoint, id: "00000000-0000-4000-8000-000000000004" }
 const reply = (value: unknown, selectedEpoch = epoch) => Response.json({ ok: true, profile: VOLATILE_PROFILE, epoch: selectedEpoch, value });
 const connected = (ep = endpoint, selectedEpoch = epoch) => reply({ kind: "connected", endpoint: ep, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() }, selectedEpoch);
 function fixture(handler: (body: any) => Response | Promise<Response>, timeout = 1000) {
-  const store = createTaskStore({ path: ":memory:" });
+  const store = createTaskStore();
   const requests: any[] = [];
   const fetcher = Object.assign(async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => { const body = JSON.parse(String(init?.body)); requests.push(body); return handler(body); }, { preconnect: fetch.preconnect }) as typeof fetch;
   const session = createVolatileTaskSession({ url: "http://127.0.0.1:1/staged", callerSession: "fixture", store, fetch: fetcher, requestTimeoutMs: timeout });
@@ -68,7 +66,7 @@ test("rejects duplicate, out-of-order, truncated, or mismatched page cursors bef
   }
 });
 
-test("reset latches durably, quarantines unchanged pending work, and requires explicit rebind", async () => {
+test("reset latches in RAM; explicit rebind discards old state without adopting task authority", async () => {
   let reset = false;
   const f = fixture(body => {
     if (body.operation === "connect") return connected(reset ? nextEndpoint : endpoint, reset ? otherEpoch : epoch);
@@ -88,17 +86,17 @@ test("reset latches durably, quarantines unchanged pending work, and requires ex
     const rebound = await f.session.rebind();
     expect(rebound.endpoint).toEqual(nextEndpoint);
     expect(f.store.getReceiveCursor()).toBe("0");
-    expect(f.store.quarantinedOutbox()[0]!.envelope).toEqual(blocked.envelope);
+    expect(f.store.quarantinedOutbox()).toEqual([]); expect(rebound.listTasks()).toEqual([]);
     expect(f.requests.at(-1).epoch).toBeUndefined();
     // Neither retained old handles nor a new endpoint may mutate old task authority.
     const before = JSON.stringify(f.store.getTask(blocked.envelope.taskId));
     await expect(old.submitIntent({ taskId: blocked.envelope.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject({ code: "RELAY_RESET" });
-    await expect(rebound.submitIntent({ taskId: blocked.envelope.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject({ code: "NOT_PARTICIPANT" });
+    await expect(rebound.submitIntent({ taskId: blocked.envelope.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject({ code: "UNKNOWN_TASK" });
     expect(JSON.stringify(f.store.getTask(blocked.envelope.taskId))).toBe(before);
   } finally { f.close(); }
 });
 
-test("terminal unconfirmed response reaches durable quarantine with unknown-outcome evidence", async () => {
+test("terminal unconfirmed response retains unknown-outcome evidence for this lifetime", async () => {
   const f = fixture(body => body.operation === "connect" ? connected() : body.operation === "resolve" ? reply({ kind: "resolved", endpoint: body.target })
     : Response.json({ ok: false, profile: VOLATILE_PROFILE, epoch, error: { code: "DELIVERY_UNCONFIRMED", retryable: false, mayHaveBeenDelivered: true } }));
   try {
@@ -150,7 +148,7 @@ test("explicit rebind fences an in-flight old send and its late acceptance", asy
     release(reply({ kind: "accepted", envelopeId: sent.envelope.envelopeId, acceptanceId: epoch, duplicate: false, forwarding: "local" }));
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(f.store.outbox("accepted")).toEqual([]);
-    expect(f.store.quarantinedOutbox()).toHaveLength(1);
+    expect(f.store.quarantinedOutbox()).toEqual([]);
     expect(f.store.getRelayTransportBinding()).toMatchObject({ epoch: otherEpoch, endpoint: nextEndpoint });
     expect(f.store.getReceiveCursor()).toBe("0");
     expect(f.session.status().state).toBe("ready");
@@ -172,6 +170,7 @@ test("a late reset from another controller cannot quarantine a successor's pendi
     const old = await f.session.connect();
     const outcome = old.createTask({ target: endpoint, task: "old request", timeoutMs: 60_000 }).then(() => undefined, error => error);
     await sending;
+    const oldTaskId = old.listTasks()[0]!.taskId;
     const current = await other.rebind();
     await expect(current.createTask({ target: nextEndpoint, task: "new pending", timeoutMs: 60_000 })).rejects.toMatchObject({ code: "PEER_UNREACHABLE" });
     release(reply({ kind: "ignored" }, otherEpoch));
@@ -180,8 +179,8 @@ test("a late reset from another controller cannot quarantine a successor's pendi
     expect(f.store.getRelayTransportBinding()?.reset).toBeUndefined();
     expect(f.store.outbox("pending")).toHaveLength(1);
     expect(f.store.outbox("pending")[0]!.envelope.source).toEqual(nextEndpoint);
-    expect(f.store.quarantinedOutbox()).toHaveLength(1);
-    await expect(old.submitIntent({ taskId: old.listTasks()[0]!.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject({ code: "RELAY_RESET" });
+    expect(f.store.quarantinedOutbox()).toEqual([]);
+    await expect(old.submitIntent({ taskId: oldTaskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject({ code: "RELAY_RESET" });
     expect(other.status().state).toBe("ready");
   } finally { other.close(); f.close(); }
 });
@@ -201,24 +200,13 @@ test("a late initial handshake cannot overwrite another controller's installed b
   } finally { other.close(); f.close(); }
 });
 
-test("profile-bound SQLite cannot silently reopen through the default adapter", async () => {
-  const root = mkdtempSync(join(tmpdir(), "tasks-no-downgrade-"));
-  const path = join(root, "tasks.sqlite");
-  const store = createTaskStore({ path });
-  store.setEndpointBinding(endpoint);
-  store.setRelayTransportBinding({ profile: VOLATILE_PROFILE, epoch, endpoint, generation: "g", callerSession: "fixture", url: "http://127.0.0.1:1/staged" });
-  store.close();
-  let requests = 0;
-  const fetcher = Object.assign(async () => { requests++; return connected(); }, { preconnect: fetch.preconnect }) as typeof fetch;
-  try {
-    await expect(createWolfpackTaskCore({ path, sessionName: "fixture", fetch: fetcher })).rejects.toMatchObject({ code: "RELAY_PROFILE_REQUIRED" });
-    expect(requests).toBe(0);
-    const db = new Database(path);
-    try { db.query("UPDATE relay_state SET value = 'null' WHERE name = 'transport_binding'").run(); }
-    finally { db.close(); }
-    await expect(createWolfpackTaskCore({ path, sessionName: "fixture", fetch: fetcher })).rejects.toMatchObject({ code: "INVALID_RELAY_METADATA" });
-    expect(requests).toBe(0);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+test("fresh endpoint memory cannot inherit a prior binding or cursor", () => {
+  const prior = createTaskStore(); prior.setEndpointBinding(endpoint); prior.setReceiveCursor("42");
+  prior.setRelayTransportBinding({ profile: VOLATILE_PROFILE, epoch, endpoint, generation: "g", callerSession: "fixture", url: "http://127.0.0.1:1/staged" });
+  prior.close();
+  const fresh = createTaskStore();
+  expect(fresh.getEndpointBinding()).toBeUndefined(); expect(fresh.getRelayTransportBinding()).toBeUndefined(); expect(fresh.getReceiveCursor()).toBe("0");
+  fresh.close();
 });
 
 test("cancellation before explicit rebind does not retire a healthy binding", async () => {

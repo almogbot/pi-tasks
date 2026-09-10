@@ -480,7 +480,7 @@ test("keeps missing idle insertion evidence unacknowledged and retryable after p
 		expect(recordedInsertions).toBe(0);
 		expect(acknowledgements).toBe(0);
 		expect(wakes).toBe(0);
-		expect([...deliveryEvidence]).toEqual(["receiver_persisted:confirmed", "pi_insertion:blocked"]);
+		expect([...deliveryEvidence]).toEqual(["receiver_recorded:confirmed", "pi_insertion:blocked"]);
 	} finally {
 		sessionShutdown?.();
 	}
@@ -554,7 +554,7 @@ test("persists an idle task event before sending one separate wake", async () =>
 		expect(sent).toHaveLength(2);
 		expect(recordedInsertions).toBe(1);
 		expect(acknowledgements).toBe(1);
-		expect([...deliveryEvidence]).toEqual(["receiver_persisted:confirmed", "wake_requested:confirmed", "wake_accepted:confirmed"]);
+		expect([...deliveryEvidence]).toEqual(["receiver_recorded:confirmed", "wake_requested:confirmed", "wake_accepted:confirmed"]);
 	} finally {
 		sessionShutdown?.();
 	}

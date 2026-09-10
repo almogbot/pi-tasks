@@ -18,8 +18,8 @@ afterEach(() => {
 
 test("rejects hostile receiver timeout intents before durable receipt or task history mutation", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const originStore = createTaskStore({ path: ":memory:" });
-	const receiverStore = createTaskStore({ path: ":memory:" });
+	const originStore = createTaskStore();
+	const receiverStore = createTaskStore();
 	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: originStore, ids: sequence("origin") });
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequence("receiver") });
 	await origin.connect();
@@ -45,12 +45,12 @@ test("rejects hostile receiver timeout intents before durable receipt or task hi
 	expect(origin.getTask(created.taskId)?.events.map((event) => event.type)).toEqual(["task.created"]);
 });
 
-test("rejects mismatched assignment headers before durable receipt and preserves that failure after restart", async () => {
+test("rejects mismatched assignment headers before durable receipt and preserves that failure after same-lifetime core replacement", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-core-");
 	temporaryDirectories.push(directory);
 	const path = join(directory, "tasks.sqlite");
 	const relay = createInMemoryTaskRelay("memory");
-	const store = createTaskStore({ path });
+	const store = createTaskStore();
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store, ids: sequence("receiver") });
 	await receiver.connect();
 	await relay.connect({ endpoint: ORIGIN, protocolVersion: TASK_PROTOCOL_VERSION, receiveCursor: "0" });
@@ -69,9 +69,8 @@ test("rejects mismatched assignment headers before durable receipt and preserves
 
 	await expect(receiver.receive()).rejects.toThrow("assignment envelope headers do not match its payload");
 	expect(receiver.listTasks()).toEqual([]);
-	store.close();
-
-	const restartedStore = createTaskStore({ path });
+	// Replace the core object, retaining this lifetime's RAM state.
+	const restartedStore = store;
 	const restarted = createTaskCore({ endpoint: RECEIVER, relay, store: restartedStore, ids: sequence("restart") });
 	await expect(restarted.receive()).rejects.toThrow("assignment envelope headers do not match its payload");
 	expect(restarted.listTasks()).toEqual([]);
@@ -80,7 +79,7 @@ test("rejects mismatched assignment headers before durable receipt and preserves
 
 test("rejects assignments whose created event payload disagrees with the task header", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const store = createTaskStore({ path: ":memory:" });
+	const store = createTaskStore();
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store, ids: sequence("receiver") });
 	await receiver.connect();
 	await relay.connect({ endpoint: ORIGIN, protocolVersion: TASK_PROTOCOL_VERSION, receiveCursor: "0" });
@@ -103,9 +102,9 @@ test("rejects assignments whose created event payload disagrees with the task he
 
 test("retries a durable canonical outbox before acknowledging a replayed receiver intent", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const originStore = createTaskStore({ path: ":memory:" });
+	const originStore = createTaskStore();
 	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: originStore, ids: sequence("origin") });
-	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("receiver") });
+	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: createTaskStore(), ids: sequence("receiver") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: RECEIVER, task: "implement", timeoutMs: 1_000 });
@@ -129,7 +128,7 @@ test("quarantines a permanent rejection, reports it to its initiating operation,
 	const state = { blockedTargetId: "stale" as string | undefined, sent: [] as string[], receiveCalls: 0 };
 	const relay = selectiveRelay(state);
 	const origin = { relay: relay.id, id: "origin" };
-	const store = createTaskStore({ path: ":memory:" });
+	const store = createTaskStore();
 	const core = createTaskCore({ endpoint: origin, relay, store, ids: sequence("isolated") });
 	await core.connect();
 
@@ -156,7 +155,7 @@ test("keeps retryable target registration failures pending and reports them on l
 	const state = { blockedTargetId: "stale" as string | undefined, sent: [] as string[], receiveCalls: 0, retryable: true };
 	const relay = selectiveRelay(state);
 	const origin = { relay: relay.id, id: "origin" };
-	const store = createTaskStore({ path: ":memory:" });
+	const store = createTaskStore();
 	const core = createTaskCore({ endpoint: origin, relay, store, ids: sequence("transient") });
 	await core.connect();
 
@@ -175,8 +174,8 @@ test("keeps retryable target registration failures pending and reports them on l
 test("exposes a permanently blocked receiver terminal delivery without changing canonical task status", async () => {
 	const state = { blocked: false, retryable: false };
 	const relay = expiringOriginRelay(state);
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const receiverStore = createTaskStore({ path: ":memory:" });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const receiverStore = createTaskStore();
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequence("receiver") });
 	await origin.connect();
 	await receiver.connect();
@@ -205,8 +204,8 @@ test("exposes a permanently blocked receiver terminal delivery without changing 
 test("reuses one pending receiver terminal intent across concurrent retryable failures", async () => {
 	const state = { blocked: false, retryable: true };
 	const relay = expiringOriginRelay(state);
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const receiverStore = createTaskStore({ path: ":memory:" });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const receiverStore = createTaskStore();
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequence("receiver") });
 	await origin.connect();
 	await receiver.connect();
@@ -235,8 +234,8 @@ test("reuses one pending receiver terminal intent across concurrent retryable fa
 test("reserves one receiver terminal action across conflicting concurrent calls", async () => {
 	const state = { blocked: false, retryable: true };
 	const relay = expiringOriginRelay(state);
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const receiverStore = createTaskStore({ path: ":memory:" });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const receiverStore = createTaskStore();
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequence("receiver") });
 	await origin.connect();
 	await receiver.connect();
@@ -257,8 +256,8 @@ test("reserves one receiver terminal action across conflicting concurrent calls"
 
 test("keeps one accepted receiver terminal identity across sequential retries", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const receiverStore = createTaskStore({ path: ":memory:" });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const receiverStore = createTaskStore();
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequence("receiver") });
 	await origin.connect();
 	await receiver.connect();
@@ -280,14 +279,14 @@ test("keeps one accepted receiver terminal identity across sequential retries", 
 	expect(receiverStore.outbox("accepted").filter((record) => record.envelope.kind === TaskEnvelopeKind.intent)).toHaveLength(1);
 });
 
-test("preserves blocked receiver terminal identity across restart", async () => {
+test("preserves blocked receiver terminal identity across same-lifetime core replacement", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-core-");
 	temporaryDirectories.push(directory);
 	const path = join(directory, "tasks.sqlite");
 	const state = { blocked: false, retryable: false };
 	const relay = expiringOriginRelay(state);
-	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("origin") });
-	const receiverStore = createTaskStore({ path });
+	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequence("origin") });
+	const receiverStore = createTaskStore();
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequence("receiver") });
 	await origin.connect();
 	await receiver.connect();
@@ -297,9 +296,8 @@ test("preserves blocked receiver terminal identity across restart", async () => 
 	await expect(receiver.submitIntent({ taskId: created.taskId, type: "task.completed", payload: { summary: "finished" } })).rejects.toMatchObject({ code: "TARGET_NOT_REGISTERED" });
 	const blocked = receiver.getTask(created.taskId)?.terminalDelivery;
 	const quarantine = receiverStore.quarantinedOutbox();
-	receiverStore.close();
-
-	const restartedStore = createTaskStore({ path });
+	// Replace the core object, retaining this lifetime's RAM state.
+	const restartedStore = receiverStore;
 	const restarted = createTaskCore({ endpoint: RECEIVER, relay, store: restartedStore, ids: sequence("restart") });
 	await expect(restarted.submitIntent({ taskId: created.taskId, type: "task.completed", payload: { summary: "finished" } })).rejects.toMatchObject({ code: "TARGET_NOT_REGISTERED" });
 
@@ -308,13 +306,13 @@ test("preserves blocked receiver terminal identity across restart", async () => 
 	restartedStore.close();
 });
 
-test("reserves one origin cancellation across sequential, concurrent, and restart retries", async () => {
+test("reserves one origin cancellation across sequential, concurrent, and same-lifetime core replacement retries", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-core-");
 	temporaryDirectories.push(directory);
 	const path = join(directory, "tasks.sqlite");
 	const state = { blockedTargetId: undefined as string | undefined, sent: [] as string[], receiveCalls: 0 };
 	const relay = selectiveRelay(state);
-	const store = createTaskStore({ path });
+	const store = createTaskStore();
 	const origin = createTaskCore({ endpoint: ORIGIN, relay, store, ids: sequence("origin") });
 	await origin.connect();
 	const created = await origin.createTask({ target: RECEIVER, task: "cancel after receiver disappears", timeoutMs: 1_000 });
@@ -345,9 +343,8 @@ test("reserves one origin cancellation across sequential, concurrent, and restar
 		expect(retry.status).toBe("rejected");
 		if (retry.status === "rejected") expect(retry.reason).toMatchObject(blockedOutcome);
 	}
-	store.close();
-
-	const restartedStore = createTaskStore({ path });
+	// Replace the core object, retaining this lifetime's RAM state.
+	const restartedStore = store;
 	const restarted = createTaskCore({ endpoint: ORIGIN, relay, store: restartedStore, ids: sequence("restart") });
 	await expect(restarted.submitIntent({ taskId: created.taskId, type: "task.cancelled", payload: {} })).rejects.toMatchObject(blockedOutcome);
 
@@ -364,7 +361,7 @@ test("evaluates every expired task when one timeout envelope is undeliverable", 
 	const relay = selectiveRelay(state);
 	const origin = { relay: relay.id, id: "origin" };
 	const now = { value: 1_000 };
-	const core = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), clock: { now: (): number => now.value }, ids: sequence("timeout") });
+	const core = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), clock: { now: (): number => now.value }, ids: sequence("timeout") });
 	await core.connect();
 	const stale = await core.createTask({ target: { relay: relay.id, id: "stale" }, task: "stale", timeoutMs: 500 });
 	const live = await core.createTask({ target: { relay: relay.id, id: "live" }, task: "live", timeoutMs: 500 });
@@ -382,7 +379,7 @@ test("reports timeout delivery only for envelopes created by that evaluation", a
 	const relay = selectiveRelay(state);
 	const origin = { relay: relay.id, id: "origin" };
 	const now = { value: 1_000 };
-	const store = createTaskStore({ path: ":memory:" });
+	const store = createTaskStore();
 	const core = createTaskCore({ endpoint: origin, relay, store, clock: { now: (): number => now.value }, ids: sequence("scoped-timeout") });
 	await core.connect();
 	await expect(core.createTask({ target: { relay: relay.id, id: "stale" }, task: "historical failure", timeoutMs: 10_000 })).rejects.toThrow("target is inactive");
@@ -400,7 +397,7 @@ test("receives inbox deliveries while an unrelated outbox envelope remains undel
 	const state = { blockedTargetId: "stale" as string | undefined, sent: [] as string[], receiveCalls: 0 };
 	const relay = selectiveRelay(state);
 	const origin = { relay: relay.id, id: "origin" };
-	const core = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("receive") });
+	const core = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), ids: sequence("receive") });
 	await core.connect();
 	await expect(core.createTask({ target: { relay: relay.id, id: "stale" }, task: "stale", timeoutMs: 1_000 })).rejects.toThrow("target is inactive");
 
@@ -408,13 +405,13 @@ test("receives inbox deliveries while an unrelated outbox envelope remains undel
 	expect(state.receiveCalls).toBe(1);
 });
 
-test("reuses a pending parent acknowledgment event and outbox identity after restart", async () => {
+test("reuses a pending parent acknowledgment event and outbox identity after same-lifetime core replacement", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-core-");
 	temporaryDirectories.push(directory);
 	const path = join(directory, "tasks.sqlite");
 	const relay = createInMemoryTaskRelay("memory");
-	const originStore = createTaskStore({ path });
-	const receiverStore = createTaskStore({ path: ":memory:" });
+	const originStore = createTaskStore();
+	const receiverStore = createTaskStore();
 	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: originStore, ids: sequence("origin") });
 	const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequence("receiver") });
 	await origin.connect();
@@ -429,9 +426,8 @@ test("reuses a pending parent acknowledgment event and outbox identity after res
 	const eventId = origin.getTask(created.taskId)?.events.find((event) => event.type === "task.parent_acknowledged")?.eventId;
 	if (eventId === undefined) throw new Error("expected the parent acknowledgment event to persist before delivery");
 	const outboxIds = [...originStore.outbox("pending"), ...originStore.outbox("accepted")].map((record) => record.envelope.envelopeId);
-	originStore.close();
-
-	const restartedStore = createTaskStore({ path });
+	// Replace the core object, retaining this lifetime's RAM state.
+	const restartedStore = originStore;
 	const restarted = createTaskCore({ endpoint: ORIGIN, relay, store: restartedStore, ids: sequence("restart") });
 	await restarted.acknowledgeParent(created.taskId);
 
@@ -441,23 +437,21 @@ test("reuses a pending parent acknowledgment event and outbox identity after res
 	restartedStore.close();
 });
 
-test("scans every locally-owned origin task for timeout after relay acceptance fails and survives restart", async () => {
+test("scans every locally-owned origin task for timeout after relay acceptance fails and survives same-lifetime core replacement", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-core-");
 	temporaryDirectories.push(directory);
 	const path = join(directory, "tasks.sqlite");
 	const relay = createInMemoryTaskRelay("memory");
 	const now = { value: 1_000 };
 	const clock = { now: (): number => now.value };
-	const store = createTaskStore({ path });
+	const store = createTaskStore();
 	const origin = createTaskCore({ endpoint: ORIGIN, relay, store, clock, ids: sequence("origin") });
 	await origin.connect();
 	await relay.connect({ endpoint: RECEIVER, protocolVersion: TASK_PROTOCOL_VERSION, receiveCursor: "0" });
 	relay.failNextSend();
 	await expect(origin.createTask({ target: RECEIVER, task: "implement", timeoutMs: 500 })).rejects.toThrow("in-memory relay send failed");
-	store.close();
-
 	now.value = 1_501;
-	const restartedStore = createTaskStore({ path });
+	const restartedStore = store; // Same endpoint lifetime; no restart recovery.
 	const restarted = createTaskCore({ endpoint: ORIGIN, relay, store: restartedStore, clock, ids: sequence("restart") });
 	await restarted.evaluateTimeouts();
 

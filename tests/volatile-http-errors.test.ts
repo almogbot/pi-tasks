@@ -6,7 +6,7 @@ const endpoint = { relay: "wolfpack-pi-tasks-v2", id: "00000000-0000-4000-8000-0
 const reply = (value: unknown) => Response.json({ ok: true, profile, epoch, value });
 const connected = () => reply({ kind: "connected", endpoint, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
 function setup(handler: (body: any) => Response) {
-  const store = createTaskStore({ path: ":memory:" }); let calls = 0;
+  const store = createTaskStore(); let calls = 0;
   const fetcher = Object.assign(async (_url: unknown, init?: RequestInit) => { calls++; return handler(JSON.parse(String(init?.body))); }, { preconnect: fetch.preconnect }) as typeof fetch;
   const options = { url: "http://127.0.0.1:1/volatile", callerSession: "fixture", store, fetch: fetcher };
   const session = createVolatileTaskSession(options);

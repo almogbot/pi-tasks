@@ -12,8 +12,8 @@ const receiver = { relay: "memory", id: "receiver" };
 
 test("persists inbound state, inserts structural evidence, then records a logical receipt before relay acknowledgement", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("parent") });
-	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("child") });
+	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), ids: ids("parent") });
+	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore(), ids: ids("child") });
 	await parent.connect();
 	await child.connect();
 	const created = await parent.createTask({ target: receiver, task: "implement", timeoutMs: 1_000 });
@@ -26,18 +26,18 @@ test("persists inbound state, inserts structural evidence, then records a logica
 
 	await deliverTaskInbox(pi, child, context);
 
-	expect(entries).toContainEqual({ type: "custom_message", customType: "pi-tasks-event", details: { taskId: created.taskId, eventId: "parent-2" } });
+	expect(entries).toContainEqual({ type: "custom_message", customType: "pi-tasks-event", details: expect.objectContaining({ taskId: created.taskId, eventId: "parent-2", event: expect.objectContaining({ type: "task.created", payload: expect.objectContaining({ task: "implement" }) }) }) });
 	expect(relay.envelopesFor(receiver)).toHaveLength(1);
 	await parent.receive();
 	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload.stage)).toEqual([
-		"receiver_persisted", "pi_inserted", "wake_requested", "wake_accepted",
+		"receiver_recorded", "pi_inserted", "wake_requested", "wake_accepted",
 	]);
 });
 
-test("reports receiver persistence and blocked Pi insertion to the origin without advancing delivery", async () => {
+test("reports receiver receipt (RAM) and blocked Pi insertion to the origin without advancing delivery", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("parent") });
-	const childStore = createTaskStore({ path: ":memory:" });
+	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), ids: ids("parent") });
+	const childStore = createTaskStore();
 	const child = createTaskCore({ endpoint: receiver, relay, store: childStore, ids: ids("child") });
 	await parent.connect();
 	await child.connect();
@@ -51,15 +51,15 @@ test("reports receiver persistence and blocked Pi insertion to the origin withou
 
 	expect(childStore.getReceiveCursor()).toBe("0");
 	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload)).toEqual([
-		expect.objectContaining({ stage: "receiver_persisted", state: "confirmed" }),
+		expect.objectContaining({ stage: "receiver_recorded", state: "confirmed" }),
 		expect.objectContaining({ stage: "pi_insertion", state: "blocked", retryable: true }),
 	]);
 });
 
 test("keeps the relay delivery retryable until a separate wake is durably accepted", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("parent") });
-	const childStore = createTaskStore({ path: ":memory:" });
+	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), ids: ids("parent") });
+	const childStore = createTaskStore();
 	const child = createTaskCore({ endpoint: receiver, relay, store: childStore, ids: ids("child") });
 	await parent.connect();
 	await child.connect();
@@ -94,15 +94,15 @@ test("keeps the relay delivery retryable until a separate wake is durably accept
 	expect(entries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-event" && "details" in entry && typeof entry.details === "object" && entry.details !== null && "taskId" in entry.details && entry.details.taskId === created.taskId)).toHaveLength(1);
 	await parent.receive();
 	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload.stage)).toEqual([
-		"receiver_persisted", "pi_inserted", "wake_requested", "wake_accepted",
+		"receiver_recorded", "pi_inserted", "wake_requested", "wake_accepted",
 	]);
 });
 
 test("origin acknowledges raw receiver intents before rendering their canonical message and completion", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const parentStore = createTaskStore({ path: ":memory:" });
+	const parentStore = createTaskStore();
 	const parent = createTaskCore({ endpoint: origin, relay, store: parentStore, ids: ids("parent") });
-	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("child") });
+	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore(), ids: ids("child") });
 	await parent.connect();
 	await child.connect();
 	const created = await parent.createTask({ target: receiver, task: "implement", timeoutMs: 1_000 });
@@ -127,7 +127,7 @@ test("origin acknowledges raw receiver intents before rendering their canonical 
 
 	expect(parent.getTask(created.taskId)?.status).toBe("completed");
 	expect(parent.getTask(created.taskId)?.events.filter((event) => event.type === "task.delivery_receipt").map((event) => event.payload.stage)).toEqual([
-		"receiver_persisted", "pi_inserted", "wake_requested", "wake_accepted",
+		"receiver_recorded", "pi_inserted", "wake_requested", "wake_accepted",
 	]);
 	expect(parent.getTask(created.taskId)?.events.slice(-2).map((event) => event.type)).toEqual(["task.information", "task.completed"]);
 	expect(parentStore.getReceiveCursor()).toBe("7");
@@ -143,8 +143,8 @@ test("origin acknowledges raw receiver intents before rendering their canonical 
 
 test("origin acknowledges raw receiver intents and renders their canonical message and completion once", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("parent") });
-	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("child") });
+	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), ids: ids("parent") });
+	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore(), ids: ids("child") });
 	await parent.connect();
 	await child.connect();
 	const created = await parent.createTask({ target: receiver, task: "implement", timeoutMs: 1_000 });
@@ -174,12 +174,12 @@ test("origin acknowledges raw receiver intents and renders their canonical messa
 	expect(parentEntries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-wake")).toHaveLength(2);
 });
 
-test("recovers the next assignment after terminal completion, parent acknowledgement, and receiver restart", async () => {
+test("recovers the next assignment after terminal completion, parent acknowledgement, and receiver core replacement", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-inbox-");
 	const receiverPath = `${directory}/receiver.sqlite`;
 	const relay = createInMemoryTaskRelay("memory");
-	const parentStore = createTaskStore({ path: ":memory:" });
-	let childStore = createTaskStore({ path: receiverPath });
+	const parentStore = createTaskStore();
+	let childStore = createTaskStore();
 	const parent = createTaskCore({ endpoint: origin, relay, store: parentStore, ids: ids("parent") });
 	let child = createTaskCore({ endpoint: receiver, relay, store: childStore, ids: ids("child") });
 	const entries: unknown[] = [];
@@ -209,12 +209,10 @@ test("recovers the next assignment after terminal completion, parent acknowledge
 		await deliverTaskInbox(pi, child, context);
 		expect(child.getTask(first.taskId)?.events.map((event) => event.type)).toContain("task.parent_acknowledged");
 
-		const second = await parent.createTask({ target: receiver, task: "second assignment after restart", timeoutMs: 1_000 });
+		const second = await parent.createTask({ target: receiver, task: "second assignment after same-lifetime core replacement", timeoutMs: 1_000 });
 		await child.receive();
 		expect(child.getTask(second.taskId)?.status).toBe("active");
-		childStore.close();
-
-		childStore = createTaskStore({ path: receiverPath });
+		// Replace the core object, retaining this lifetime's RAM state.
 		child = createTaskCore({ endpoint: receiver, relay, store: childStore, ids: ids("restarted-child") });
 		await child.connect();
 		await deliverTaskInbox(pi, child, context);
@@ -232,8 +230,8 @@ test("recovers the next assignment after terminal completion, parent acknowledge
 
 test("fails closed on an unknown canonical event without advancing the relay delivery cursor", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("parent") });
-	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore({ path: ":memory:" }), ids: ids("child") });
+	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), ids: ids("parent") });
+	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore(), ids: ids("child") });
 	await parent.connect();
 	await child.connect();
 	const created = await parent.createTask({ target: receiver, task: "implement", timeoutMs: 1_000 });

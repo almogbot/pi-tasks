@@ -15,7 +15,7 @@ export interface VolatileTaskSessionOptions {
   /** Explicit trusted endpoint ingress URL. No default route or installed server. */
   readonly url: string;
   readonly callerSession: string;
-  /** Caller owns this endpoint SQLite store and must close it after session.close(). */
+  /** Caller owns this endpoint's RAM state and closes it after session.close(). */
   readonly store: TaskStore;
   readonly fetch?: typeof fetch;
   readonly requestTimeoutMs?: number;
@@ -64,14 +64,14 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
     if (!replace && core) { transport!.assertStoredBinding(saved()); await core.connect(signal); return core; }
     busy = true;
     try {
-      const prior = saved(), priorEndpoint = store.getEndpointBinding();
+      let prior = saved(), priorEndpoint = store.getEndpointBinding();
       if (prior) validateSaved(prior);
       if (!replace && (reset || prior?.reset || (!prior && priorEndpoint) || (prior && (prior.url !== url.href || prior.callerSession !== options.callerSession)))) { reset = true; throw failure("RELAY_REBIND_REQUIRED", false); }
       if (replace) {
-        // Retire and persist before any new registration. Failure leaves the old
-        // binding visibly stopped, never automatically restored/rearmed.
+        // Explicit acceptance of loss starts empty. Session history is the only
+        // archive; old task identities/ACKs/outbox must never enter the new scope.
         transport?.stop(); core = undefined; reset = true;
-        store.transaction(() => { if (prior) store.setRelayTransportBinding({ ...prior, reset: true }); quarantine(priorEndpoint, "RELAY_RESET"); });
+        store.clear(); prior = undefined; priorEndpoint = undefined;
       }
       const expectedBinding = saved();
       const generation = replace ? crypto.randomUUID() : prior?.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
@@ -90,8 +90,8 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
         store.setEndpointBinding(binding.endpoint); store.setRelayTransportBinding(binding);
       });
       reset = false;
-      // Retained old core handles may read history, but cannot mutate SQLite even
-      // if they resume after await. The original store remains controller-owned.
+      // Retained old core handles cannot mutate a successor lifetime even if
+      // they resume after await. The RAM store remains controller-owned.
       const guard = () => selected.assertStoredBinding(saved());
       const guarded: TaskStore = { ...store, transaction<T>(operation: () => T): T {
         guard();

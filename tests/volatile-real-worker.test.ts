@@ -13,7 +13,7 @@ const revision = process.env.PI_TASKS_WOLFPACK_REVISION;
 // Settle through normal JS await, then assert the identical structured failure.
 const failure = (pending: Promise<unknown>): Promise<unknown> => pending.then(() => undefined, (error: unknown) => error);
 
-test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer confirmation loss, SQLite reopen and explicit epoch rebind", async () => {
+test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer confirmation loss, same-lifetime reconnect and explicit epoch rebind", async () => {
   expect(isAbsolute(wolfpack!)).toBe(true);
   expect(revision).toMatch(/^[0-9a-f]{40}$/);
   expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: wolfpack, encoding: "utf8" }).trim()).toBe(revision!);
@@ -64,8 +64,8 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
   };
   try {
     const a = await make("a"), b = await make("b");
-    let aStore = createTaskStore({ path: join(root, "a.sqlite") }); stores.push(aStore);
-    let bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores.push(bStore);
+    let aStore = createTaskStore(); stores.push(aStore);
+    let bStore = createTaskStore(); stores.push(bStore);
     let aSession = createVolatileTaskSession({ url: a.url, callerSession: "origin", store: aStore }); sessions.push(aSession);
     let bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
     let ac = await aSession.connect(); let bc = await bSession.connect();
@@ -77,8 +77,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     const target = resolved.value.endpoint;
     expect(await failure(ac.createTask({ target, task: "first", timeoutMs: 60_000 }))).toMatchObject({ code: "PEER_UNREACHABLE", retryable: true });
     expect(aStore.outbox("pending")).toHaveLength(1); expect(aStore.outbox("accepted")).toEqual([]);
-    aSession.close(); aStore.close();
-    aStore = createTaskStore({ path: join(root, "a.sqlite") }); stores[0] = aStore;
+    aSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     aSession = createVolatileTaskSession({ url: a.url, callerSession: "origin", store: aStore }); sessions.push(aSession);
     ac = await aSession.connect();
     expect(aStore.getRelayTransportBinding()).toEqual(aBinding);
@@ -91,18 +90,16 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     const first = await bc.receive(); expect(first.map(d => d.cursor)).toEqual(["1", "2", "3"]);
     expect(await failure(bc.acknowledgeRelayDelivery("2"))).toMatchObject({ code: "RELAY_UNAVAILABLE" });
     expect(bStore.getReceiveCursor()).toBe("0");
-    bSession.close(); bStore.close();
-    bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores[1] = bStore;
+    bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
-    bc = await bSession.connect(); // Durable, epoch-bound ACK intent retries without a RAM map.
+    bc = await bSession.connect(); // RAM-owned, epoch-bound ACK intent retries without a RAM map.
     const ackCalls = b.calls.filter(call => call.operation === "acknowledge");
     expect(ackCalls).toHaveLength(2); expect(ackCalls[1]).toEqual(ackCalls[0]);
     expect(bStore.getReceiveCursor()).toBe("0");
     const sparse = await bc.receive(); expect(sparse.map(d => d.cursor)).toEqual(["1", "3"]);
     expect(sparse[1]!.envelope.envelopeId).toBe(first[2]!.envelope.envelopeId);
     await bc.acknowledgeRelayDelivery("3");
-    bSession.close(); bStore.close();
-    bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores[1] = bStore;
+    bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
     bc = await bSession.connect();
     expect(bStore.getRelayTransportBinding()).toEqual(bBinding);
@@ -115,8 +112,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     expect(aStore.quarantinedOutbox()).toHaveLength(1);
     const attempts = peerFrames.length; await ac.flushOutbox(); expect(peerFrames).toHaveLength(attempts);
     expect(aSession.status().state).toBe("ready"); // Peer failure does not rotate this source.
-    bSession.close(); bStore.close();
-    bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores[1] = bStore;
+    bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
     const beforeConnect = b.calls.length;
     await expect(bSession.connect()).rejects.toMatchObject({ code: "RELAY_REBIND_REQUIRED" });
@@ -125,8 +121,8 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     expect(fresh.endpoint).not.toEqual(bBinding.endpoint);
     expect(bStore.getRelayTransportBinding()?.epoch).not.toBe(bBinding.epoch);
     expect(bStore.getReceiveCursor()).toBe("0");
-    expect(fresh.listTasks()).toHaveLength(3); // History is retained, not rebound.
-    await expect(fresh.submitIntent({ taskId: first[0]!.envelope.taskId, type: "task.completed", payload: { summary: "not authorized for retired endpoint" } })).rejects.toMatchObject({ code: "NOT_PARTICIPANT" });
+    expect(fresh.listTasks()).toEqual([]); // History belongs to the Pi session, not a new endpoint.
+    await expect(fresh.submitIntent({ taskId: first[0]!.envelope.taskId, type: "task.completed", payload: { summary: "not authorized for retired endpoint" } })).rejects.toMatchObject({ code: "UNKNOWN_TASK" });
     await fresh.createTask({ target: fresh.endpoint, task: "new lifetime", timeoutMs: 60_000 });
     expect((await fresh.receive()).map(d => d.cursor)).toEqual(["1"]);
   } finally {

@@ -12,49 +12,30 @@ const endpoint = { relay: "wolfpack-pi-tasks-v2", id: "00000000-0000-4000-8000-0
 function fixture(handler?: (body: any, init: RequestInit) => Promise<Response> | Response) {
   const root = mkdtempSync(join(tmpdir(), "tasks-configured-"));
   const path = join(root, "tasks.sqlite"), calls: any[] = [];
+  const registrations = new Map<string, typeof endpoint>();
   const fetcher = Object.assign(async (url: unknown, init?: RequestInit) => {
     expect(String(url)).toBe("http://127.0.0.1:1/api/task-relay/volatile-v1");
     const body = JSON.parse(String(init?.body)); calls.push(body);
     if (handler) return handler(body, init!);
+    if (!registrations.has(body.generation)) registrations.set(body.generation, { ...endpoint, id: crypto.randomUUID() });
     return Response.json({ ok: true, profile, epoch, value: body.operation === "connect"
-      ? { kind: "connected", endpoint, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() }
+      ? { kind: "connected", endpoint: registrations.get(body.generation), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() }
       : { kind: "page", deliveries: [], nextCursor: "0", hasMore: false } });
   }, { preconnect: fetch.preconnect }) as typeof fetch;
-  return { path, calls, options: { path, sessionName: "fixture", baseUrl: "http://127.0.0.1:1", fetch: fetcher }, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { path, calls, options: { sessionName: "fixture", baseUrl: "http://127.0.0.1:1", fetch: fetcher }, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-test("configured normal transport negotiates volatile, closes SQLite and resumes the same lifetime without replay", async () => {
+test("configured close discards RAM and the next lifecycle registers a fresh identity without replay", async () => {
   const f = fixture();
   try {
     const first = await createConfiguredTaskCore(f.options);
     await first.receive(); await first.close(); await first.close();
     expect(() => first.listTasks()).toThrow("task session is closed");
-    const store = createTaskStore({ path: f.path });
-    const binding = store.getRelayTransportBinding(); store.close();
-    expect(binding).toMatchObject({ profile, epoch, endpoint });
     const second = await createConfiguredTaskCore(f.options);
-    expect(second.endpoint).toEqual(first.endpoint); await second.close();
-    expect(f.calls.filter(c => c.operation === "connect")).toHaveLength(2);
-    expect(f.calls.at(-1)).toMatchObject({ epoch, generation: binding!.generation });
-  } finally { f.cleanup(); }
-});
-
-test("legacy history requires explicit rebind, quarantines old pending work and never calls durable routes", async () => {
-  const f = fixture();
-  try {
-    const store = createTaskStore({ path: f.path });
-    const prior = { ...endpoint, id: "old-endpoint" };
-    store.setEndpointBinding(prior);
-    store.putOutbox({ envelopeId: "old-pending", taskId: "old-task", source: prior, target: endpoint, kind: "assignment", protocolVersion: "pi-tasks/v2", payload: "{}", createdAt: new Date().toISOString() });
-    store.close();
-    await expect(createConfiguredTaskCore(f.options)).rejects.toMatchObject({ code: "RELAY_REBIND_REQUIRED" });
-    expect(f.calls).toEqual([]);
-    const rebound = await createConfiguredTaskCore({ ...f.options, rebind: true }); await rebound.close();
-    const reopened = createTaskStore({ path: f.path });
-    expect(reopened.outbox("pending")).toEqual([]);
-    expect(reopened.quarantinedOutbox()).toHaveLength(1);
-    expect(reopened.quarantinedOutbox()[0]!.envelope.source).toEqual(prior);
-    expect(reopened.getRelayTransportBinding()).toMatchObject({ profile, epoch }); reopened.close();
+    expect(second.endpoint).not.toEqual(first.endpoint); expect(second.listTasks()).toEqual([]); await second.close();
+    const connects = f.calls.filter(c => c.operation === "connect");
+    expect(connects).toHaveLength(2); expect(connects[1].generation).not.toBe(connects[0].generation);
+    expect(connects[1].epoch).toBeUndefined(); expect(f.calls.some(c => c.operation === "send")).toBe(false);
   } finally { f.cleanup(); }
 });
 
@@ -63,11 +44,11 @@ test("profile refusal does not trigger downgrade or bind an unbound store", asyn
   try {
     await expect(createConfiguredTaskCore(f.options)).rejects.toMatchObject({ code: "RELAY_PROFILE_REQUIRED" });
     expect(f.calls).toHaveLength(1);
-    const store = createTaskStore({ path: f.path }); expect(store.getRelayTransportBinding()).toBeUndefined(); store.close();
+    const store = createTaskStore(); expect(store.getRelayTransportBinding()).toBeUndefined(); store.close();
   } finally { f.cleanup(); }
 });
 
-test("owned close aborts pending receive before closing SQLite and fences new work", async () => {
+test("owned close aborts pending receive before discarding RAM and fences new work", async () => {
   let started!: () => void;
   const receiving = new Promise<void>(resolve => { started = resolve; });
   const f = fixture(body => {
@@ -80,7 +61,7 @@ test("owned close aborts pending receive before closing SQLite and fences new wo
     await receiving; await core.close();
     expect(await result).toBe("RELAY_RESET");
     expect(() => core.receive()).toThrow("task session is closed");
-    const reopened = createTaskStore({ path: f.path }); expect(reopened.getReceiveCursor()).toBe("0"); reopened.close();
+    const fresh = createTaskStore(); expect(fresh.getReceiveCursor()).toBe("0"); fresh.close();
   } finally { f.cleanup(); }
 });
 
@@ -104,7 +85,7 @@ test("loader closes cached ownership once per lifecycle and starts a fresh insta
   await loader.close(); expect(closes).toBe(2);
 });
 
-test("loader startup waits for SQLite ownership disposal and a new shutdown fences that startup", async () => {
+test("loader startup waits for prior lifetime disposal and a new shutdown fences that startup", async () => {
   let release!: () => void;
   const loader = createConfiguredCoreLoader(async () => ({ close: () => new Promise<void>(resolve => { release = resolve; }) }) as unknown as TaskCore);
   await loader();

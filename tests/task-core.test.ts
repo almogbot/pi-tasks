@@ -22,8 +22,8 @@ interface Fixture {
 
 function fixture(now = 1_000): Fixture {
 	const relay = createInMemoryTaskRelay("memory");
-	const originStore = createTaskStore({ path: ":memory:" });
-	const receiverStore = createTaskStore({ path: ":memory:" });
+	const originStore = createTaskStore();
+	const receiverStore = createTaskStore();
 	const current = { value: now };
 	const clock = { now: (): number => current.value };
 	const origin = createTaskCore({ endpoint: ORIGIN, relay, store: originStore, clock, ids: sequenceIds("origin") });
@@ -127,14 +127,14 @@ describe("endpoint-owned task core", () => {
 		expect(value.relay.envelopesFor(ORIGIN)[0]?.envelopeId).toBe(envelopeId);
 	});
 
-	test("keeps quarantined delivery evidence blocked with its stable identity after restart", async () => {
+	test("keeps quarantined delivery evidence blocked with its stable identity after same-lifetime core replacement", async () => {
 		const directory = mkdtempSync("/tmp/pi-task-evidence-quarantine-");
 		const path = join(directory, "receiver.sqlite");
 		const backing = createInMemoryTaskRelay("memory");
 		const blocked = { value: false };
 		const relay = blockOriginDelivery(backing, blocked);
-		let receiverStore = createTaskStore({ path });
-		const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequenceIds("origin") });
+		let receiverStore = createTaskStore();
+		const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequenceIds("origin") });
 		let receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequenceIds("receiver") });
 		try {
 			await origin.connect();
@@ -142,20 +142,19 @@ describe("endpoint-owned task core", () => {
 			const created = await origin.createTask({ target: RECEIVER, task: "implement narrowly", timeoutMs: 500 });
 			await receiver.receive();
 			blocked.value = true;
-			const evidence = { taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: "origin-2", stage: "receiver_persisted", state: "confirmed" } } as const;
+			const evidence = { taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: "origin-2", stage: "receiver_recorded", state: "confirmed" } } as const;
 
 			await expect(receiver.submitIntent(evidence)).rejects.toMatchObject({ code: "TARGET_NOT_REGISTERED", retryable: false });
 			const quarantinedEnvelopeId = receiverStore.quarantinedOutbox()[0]?.envelope.envelopeId;
 			if (quarantinedEnvelopeId === undefined) throw new Error("delivery evidence was not quarantined");
-			receiverStore.close();
-			receiverStore = createTaskStore({ path });
+			// Replace the core object, retaining this lifetime's RAM state.
 			receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequenceIds("resumed-receiver") });
 			await receiver.connect();
 
 			await expect(receiver.submitIntent(evidence)).rejects.toMatchObject({
 				code: "TARGET_NOT_REGISTERED",
 				retryable: false,
-				details: expect.objectContaining({ taskId: created.taskId, eventId: "origin-2", stage: "receiver_persisted", state: "confirmed" }),
+				details: expect.objectContaining({ taskId: created.taskId, eventId: "origin-2", stage: "receiver_recorded", state: "confirmed" }),
 			});
 			expect(receiverStore.quarantinedOutbox().map((record) => record.envelope.envelopeId)).toEqual([quarantinedEnvelopeId]);
 			expect(backing.envelopesFor(ORIGIN)).toEqual([]);
@@ -169,8 +168,8 @@ describe("endpoint-owned task core", () => {
 		const backing = createInMemoryTaskRelay("memory");
 		const blocked = { value: false };
 		const relay = blockOriginDelivery(backing, blocked);
-		const receiverStore = createTaskStore({ path: ":memory:" });
-		const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore({ path: ":memory:" }), ids: sequenceIds("origin") });
+		const receiverStore = createTaskStore();
+		const origin = createTaskCore({ endpoint: ORIGIN, relay, store: createTaskStore(), ids: sequenceIds("origin") });
 		const receiver = createTaskCore({ endpoint: RECEIVER, relay, store: receiverStore, ids: sequenceIds("receiver") });
 		await origin.connect();
 		await receiver.connect();

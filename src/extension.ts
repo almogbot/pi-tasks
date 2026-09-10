@@ -228,10 +228,10 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 
 	if (ownedLoader && createCore === defaultCoreFactory) pi.registerCommand("task-relay-rebind", {
-		description: "Explicitly accept relay loss and bind a fresh endpoint; old tasks remain historical",
+		description: "Accept relay loss, discard active task state and bind a fresh endpoint",
 		async handler(args, context) {
 			if (args.trim() !== "--accept-relay-loss") {
-				context.ui.notify("Relay restart can lose accepted mail. Rebind quarantines pending old-endpoint work, preserves history, and does not recover or replay it. Run /task-relay-rebind --accept-relay-loss to continue with a fresh endpoint.", "warning");
+				context.ui.notify("Relay restart can lose accepted mail. Rebind discards this lifetime's task state; Pi session history remains, but is never replayed. Run /task-relay-rebind --accept-relay-loss to continue with a fresh endpoint.", "warning");
 				return;
 			}
 			const epoch = ++lifecycleEpoch;
@@ -246,7 +246,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 				await ownedLoader(undefined, true);
 				if (epoch !== lifecycleEpoch) return;
 				closingTaskIds.clear();
-				context.ui.notify("Fresh task endpoint bound. Historical tasks were not recovered or migrated.", "info");
+				context.ui.notify("Fresh task endpoint bound with empty state. Prior tasks remain only in session history.", "info");
 			} catch (error) {
 				if (epoch === lifecycleEpoch) context.ui.notify(outboxFailureStatus(error), "error");
 			}
@@ -258,7 +258,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 
 	pi.registerTool({
-		name: "agent_task_send", label: "Send Agent Task", description: "Persist an endpoint-owned task and submit its opaque assignment envelope to a relay.", parameters: SendParams,
+		name: "agent_task_send", label: "Send Agent Task", description: "Create a task in this endpoint's RAM and submit its assignment; restart loses active state.", parameters: SendParams,
 		async execute(_id, params, signal) {
 			try {
 				const sent = await (await configuredCore(signal)).createTask({ target: params.to, task: params.task, timeoutMs: params.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS }, signal);
@@ -309,12 +309,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
 	pi.registerTool({
-		name: "agent_task_message", label: "Message Agent Task", description: "Persist a message intent before relay submission.", parameters: MessageParams,
+		name: "agent_task_message", label: "Message Agent Task", description: "Record a message intent in this lifetime before relay submission.", parameters: MessageParams,
 		async execute(_id, params, signal) { try { await (await configuredCore(signal)).submitIntent({ taskId: params.taskId, type: `task.${params.type}`, payload: { message: params.message } }, signal); return toolResult({ taskId: params.taskId }, `## task ${params.type}\n- task: \`${params.taskId}\``); } catch (error) { return taskError(error); } },
 		renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
 	pi.registerTool({
-		name: "agent_task_cancel", label: "Cancel Agent Task", description: "Persist cancellation before relay submission.", parameters: TaskIdParams,
+		name: "agent_task_cancel", label: "Cancel Agent Task", description: "Record cancellation in this lifetime before relay submission.", parameters: TaskIdParams,
 		async execute(_id, params, signal) {
 			try {
 				const activeCore = await configuredCore(signal);
@@ -334,7 +334,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		renderResult(result, _options, theme) { return new Text(theme.fg("accent", text(result))); },
 	});
 	pi.registerTool({
-		name: "agent_task_done", label: "Complete Agent Task", description: "Persist a terminal task intent before relay submission.", parameters: DoneParams,
+		name: "agent_task_done", label: "Complete Agent Task", description: "Record a terminal intent in this lifetime before relay submission.", parameters: DoneParams,
 		async execute(_id, params, signal) {
 			try {
 				const activeCore = await configuredCore(signal);
@@ -385,34 +385,34 @@ export default function piTasks(pi: ExtensionAPI): void {
 }
 
 interface TaskDeliveryEvidence {
-	readonly receiverPersistence: "not_confirmed" | "confirmed";
+	readonly receiverReceipt: "not_confirmed" | "confirmed";
 	readonly piInsertion: "not_confirmed" | "blocked" | "confirmed";
 	readonly wakeAcceptance: "not_confirmed" | "pending" | "confirmed";
 	readonly modelExecution: "not_evidenced";
 }
 
 function taskDeliveryEvidence(task: TaskSnapshot): TaskDeliveryEvidence {
-	let receiverPersistence: TaskDeliveryEvidence["receiverPersistence"] = "not_confirmed";
+	let receiverReceipt: TaskDeliveryEvidence["receiverReceipt"] = "not_confirmed";
 	let piInsertion: TaskDeliveryEvidence["piInsertion"] = "not_confirmed";
 	let wakeAcceptance: TaskDeliveryEvidence["wakeAcceptance"] = "not_confirmed";
 	const assignmentEventId = task.events.find((event) => event.type === "task.created")?.eventId;
 	for (const event of task.events) {
 		if (event.type !== "task.delivery_receipt" || event.payload.eventId !== assignmentEventId) continue;
-		if (event.payload.stage === TaskDeliveryStage.receiverPersisted) receiverPersistence = "confirmed";
+		if (event.payload.stage === TaskDeliveryStage.receiverRecorded) receiverReceipt = "confirmed";
 		if (event.payload.stage === TaskDeliveryStage.piInsertion && event.payload.state === TaskDeliveryEvidenceState.blocked) piInsertion = "blocked";
 		if (event.payload.stage === TaskDeliveryStage.piInserted || event.payload.stage === undefined) {
-			receiverPersistence = "confirmed";
+			receiverReceipt = "confirmed";
 			piInsertion = "confirmed";
 		}
 		if (event.payload.stage === TaskDeliveryStage.wakeRequested) wakeAcceptance = "pending";
 		if (event.payload.stage === TaskDeliveryStage.wakeAccepted) wakeAcceptance = "confirmed";
 	}
-	return { receiverPersistence, piInsertion, wakeAcceptance, modelExecution: "not_evidenced" };
+	return { receiverReceipt, piInsertion, wakeAcceptance, modelExecution: "not_evidenced" };
 }
 
 function deliveryEvidenceText(evidence: TaskDeliveryEvidence): string {
 	const insertion = evidence.piInsertion === "blocked" ? "blocked; retryable" : evidence.piInsertion;
-	return `\n- receiver persistence: ${evidence.receiverPersistence}\n- Pi insertion: ${insertion}\n- wake acceptance: ${evidence.wakeAcceptance}\n- model execution: ${evidence.modelExecution}`;
+	return `\n- receiver receipt (RAM): ${evidence.receiverReceipt}\n- Pi insertion: ${insertion}\n- wake acceptance: ${evidence.wakeAcceptance}\n- model execution: ${evidence.modelExecution}`;
 }
 
 function toolResult(details: unknown, markdown: string): AgentToolResult<unknown> {

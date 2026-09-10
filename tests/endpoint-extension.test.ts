@@ -19,7 +19,7 @@ interface Tool {
 
 test("registers endpoint-owned tools with only relay-qualified opaque targets", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const core = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
+	const core = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
 	await core.connect();
 	await relay.connect({ endpoint: { relay: "memory", id: "child" }, protocolVersion: "pi-tasks/v2", receiveCursor: "0" });
 	const tools: Record<string, Tool> = {};
@@ -38,8 +38,8 @@ test("registers endpoint-owned tools with only relay-qualified opaque targets", 
 
 test("status and inbox expose an active assignment only to its receiver", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const assignment = "inspect the receiver-only payload";
@@ -71,16 +71,16 @@ test("status and inbox expose an active assignment only to its receiver", async 
 	expect(receiverInbox.content[0]?.text).toContain(assignment);
 });
 
-test("origin status reports structured receiver persistence and blocked Pi insertion evidence", async () => {
+test("origin status reports structured receiver receipt (RAM) and blocked Pi insertion evidence", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "report blocked insertion", timeoutMs: 1_000 });
 	await receiver.receive();
 	const createdEventId = receiver.getTask(created.taskId)?.events[0]?.eventId ?? "";
-	await receiver.submitIntent({ taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: createdEventId, stage: "receiver_persisted", state: "confirmed" } });
+	await receiver.submitIntent({ taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: createdEventId, stage: "receiver_recorded", state: "confirmed" } });
 	await receiver.submitIntent({ taskId: created.taskId, type: "task.delivery_receipt", payload: { eventId: createdEventId, stage: "pi_insertion", state: "blocked", retryable: true } });
 	await origin.receive();
 	const tools: Record<string, Tool> = {};
@@ -90,7 +90,7 @@ test("origin status reports structured receiver persistence and blocked Pi inser
 
 	expect(status.details).toMatchObject({
 		deliveryEvidence: {
-			receiverPersistence: "confirmed",
+			receiverReceipt: "confirmed",
 			piInsertion: "blocked",
 			wakeAcceptance: "not_confirmed",
 			modelExecution: "not_evidenced",
@@ -101,8 +101,8 @@ test("origin status reports structured receiver persistence and blocked Pi inser
 
 test("done tool reports successful origin-owned completion as canonical rather than an unsubmitted receiver intent", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "complete at origin", timeoutMs: 1_000 });
@@ -124,8 +124,8 @@ test("done tool reports successful origin-owned completion as canonical rather t
 
 test("done tool keeps a reused canonical origin cancellation distinct from a late terminal", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "retry canonical cancellation", timeoutMs: 1_000 });
@@ -148,8 +148,8 @@ test("done tool keeps a reused canonical origin cancellation distinct from a lat
 
 test("done tool reports an origin-owned late terminal as a canonical event", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "record late terminal", timeoutMs: 1_000 });
@@ -176,8 +176,8 @@ test("done tool reports an origin-owned late terminal as a canonical event", asy
 
 test("done tool reports accepted terminal intent after observing canonical cancellation", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "cancel before completion", timeoutMs: 1_000 });
@@ -208,8 +208,8 @@ test("done tool reports accepted terminal intent after observing canonical cance
 test("done tool preserves blocked receiver terminal evidence without claiming canonical completion", async () => {
 	const state = { blocked: false };
 	const relay = expiringTargetRelay(state, "parent");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "complete after origin disappears", timeoutMs: 1_000 });
@@ -241,8 +241,8 @@ test("done tool preserves blocked receiver terminal evidence without claiming ca
 test("done tool reports canonical origin completion with a blocked target-delivery warning", async () => {
 	const state = { blocked: false };
 	const relay = expiringTargetRelay(state);
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "complete before target delivery", timeoutMs: 1_000 });
@@ -276,8 +276,8 @@ test("done tool reports canonical origin completion with a blocked target-delive
 
 test("cancel tool preserves completed-task late-terminal behavior", async () => {
 	const relay = createInMemoryTaskRelay("memory");
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "complete before cancellation", timeoutMs: 1_000 });
@@ -297,8 +297,8 @@ test("cancel tool preserves completed-task late-terminal behavior", async () => 
 test("late-cancel retries keep structured delivery failure when the completed target disappears", async () => {
 	const state = { blocked: false };
 	const relay = expiringTargetRelay(state);
-	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("parent") });
-	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore({ path: ":memory:" }), ids: sequence("child") });
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const receiver = createTaskCore({ endpoint: { relay: "memory", id: "child" }, relay, store: createTaskStore(), ids: sequence("child") });
 	await origin.connect();
 	await receiver.connect();
 	const created = await origin.createTask({ target: receiver.endpoint, task: "complete before target disappears", timeoutMs: 1_000 });
@@ -324,13 +324,13 @@ test("late-cancel retries keep structured delivery failure when the completed ta
 	expect(origin.getTask(created.taskId)?.events.map((event) => event.type)).toEqual(["task.created", "task.completed", "task.late_terminal"]);
 });
 
-test("cancel retries preserve the durable blocked-delivery warning after restart", async () => {
+test("cancel retries preserve the durable blocked-delivery warning after same-lifetime core replacement", async () => {
 	const directory = mkdtempSync("/tmp/pi-tasks-extension-");
 	const path = join(directory, "tasks.sqlite");
 	const state = { blocked: false };
 	const relay = expiringTargetRelay(state);
 	const target = { relay: "memory", id: "child" } as const;
-	let store = createTaskStore({ path });
+	let store = createTaskStore();
 	try {
 		let core = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store, ids: sequence("parent") });
 		await core.connect();
@@ -349,9 +349,7 @@ test("cancel retries preserve the durable blocked-delivery warning after restart
 			firstTools.agent_task_cancel!.execute("call", { taskId: created.taskId }, new AbortController().signal, undefined, {}),
 		]);
 		for (const retry of [sequentialRetry, ...concurrentRetries]) expect(retry.details).toEqual(first.details);
-		store.close();
-
-		store = createTaskStore({ path });
+		// Replace the core object, retaining this lifetime's RAM state.
 		core = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store, ids: sequence("restart") });
 		const retryTools: Record<string, Tool> = {};
 		registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; retryTools[value.name] = value; } } as unknown as ExtensionAPI, core);
@@ -368,7 +366,7 @@ test("cancel retries preserve the durable blocked-delivery warning after restart
 test("runs timeout evaluation and durable outbox retry in the default extension lifecycle", async () => {
 	const relay = createInMemoryTaskRelay("memory");
 	const now = { value: 0 };
-	const store = createTaskStore({ path: ":memory:" });
+	const store = createTaskStore();
 	const core = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store, clock: { now: (): number => now.value }, ids: sequence("parent") });
 	await core.connect();
 	await relay.connect({ endpoint: { relay: "memory", id: "child" }, protocolVersion: "pi-tasks/v2", receiveCursor: "0" });

@@ -87,7 +87,7 @@ describe("v2-only package", () => {
 		expect(readme).toContain("Explicit user or project choices override those defaults.");
 		expect(skill).toContain("an explicit user or project model choice overrides the environment/default.");
 		expect(skill).toContain("do not start a blocking “wait for assignments” prompt");
-		expect(readme).toContain("pre-persistence validation rejection creates no task");
+		expect(readme).toContain("pre-admission validation rejection creates no task");
 		expect(readme).toContain("idempotency remains necessary");
 	});
 

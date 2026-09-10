@@ -6,7 +6,7 @@ export const PARENT_ACKNOWLEDGMENT_OPERATION = "parent_acknowledgment";
 export const TERMINAL_INTENT_OPERATION = "terminal_intent";
 
 export const TaskDeliveryStage = {
-	receiverPersisted: "receiver_persisted",
+	receiverRecorded: "receiver_recorded",
 	piInsertion: "pi_insertion",
 	piInserted: "pi_inserted",
 	wakeRequested: "wake_requested",

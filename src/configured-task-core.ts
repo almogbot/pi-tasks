@@ -2,17 +2,15 @@ import type { TaskCore } from "./task-core";
 import { TaskProtocolError } from "./task-protocol";
 import { createTaskStore } from "./task-store";
 import { createVolatileTaskSession } from "./volatile-task-session";
-import { wolfpackTaskStorePath } from "./wolfpack-task-relay";
 import { wolfpackLocalHeaders } from "./wolfpack-local-auth";
 
 export interface OwnedTaskCore extends TaskCore {
-  /** Fence new work, abort transport requests, settle active calls, then close SQLite. */
+  /** Fence new work, abort requests, settle active calls, then discard RAM state. */
   close(): Promise<void>;
 }
 export interface ConfiguredTaskCoreOptions {
   readonly sessionName?: string;
   readonly baseUrl?: string;
-  readonly path?: string;
   readonly fetch?: typeof fetch;
   readonly requestTimeoutMs?: number;
   /** Explicit operator acceptance of loss/unknown outcomes; never set on automatic retry. */
@@ -28,7 +26,7 @@ export async function createConfiguredTaskCore(options: ConfiguredTaskCoreOption
   const base = new URL(options.baseUrl ?? `http://127.0.0.1:${port}`);
   if (base.username || base.password || base.search || base.hash || base.pathname !== "/") throw new TypeError("relay base URL must be an origin");
   const url = new URL("/api/task-relay/volatile-v1", base).href;
-  const store = createTaskStore({ path: options.path ?? wolfpackTaskStorePath(sessionName) });
+  const store = createTaskStore();
   let session: ReturnType<typeof createVolatileTaskSession> | undefined;
   try {
     const requestFetch = options.fetch ?? fetch;

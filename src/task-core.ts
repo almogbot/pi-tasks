@@ -347,7 +347,7 @@ function deliveryEvidence(input: SubmitIntentInput): DeliveryEvidence | undefine
 	if (stage === TaskDeliveryStage.piInsertion && state === TaskDeliveryEvidenceState.blocked && input.payload.retryable === true) {
 		return { eventId: input.payload.eventId, stage, state, retryable: true };
 	}
-	if ((stage === TaskDeliveryStage.receiverPersisted || stage === TaskDeliveryStage.piInserted || stage === TaskDeliveryStage.wakeRequested || stage === TaskDeliveryStage.wakeAccepted)
+	if ((stage === TaskDeliveryStage.receiverRecorded || stage === TaskDeliveryStage.piInserted || stage === TaskDeliveryStage.wakeRequested || stage === TaskDeliveryStage.wakeAccepted)
 		&& state === TaskDeliveryEvidenceState.confirmed) {
 		return { eventId: input.payload.eventId, stage, state };
 	}

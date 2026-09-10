@@ -2,18 +2,15 @@ import { expect, test } from "bun:test";
 import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
 import { createTaskCore } from "../src/task-core";
 import { createTaskStore } from "../src/task-store";
-import { createWolfpackTaskRelay } from "../src/wolfpack-task-relay";
+import { toWolfpackEnvelope } from "../src/wolfpack-task-relay";
 import { INVALID_RELAY_METADATA, TASK_PROTOCOL_VERSION } from "../src/task-protocol";
 import type { RelayEnvelope } from "../src/task-protocol";
 
 const origin = { relay: "memory", id: "origin" }, target = { relay: "memory", id: "target" };
 const iso = (now: number) => new Date(now).toISOString();
-const forbiddenFetch = (called: () => void): typeof fetch => Object.assign(async () => {
-	called(); throw new Error("unexpected network");
-}, { preconnect() { throw new Error("unexpected preconnect"); } });
 
 test("assignment, intent and canonical envelopes persist their creation time without changing task event authority", async () => {
-	const relay = createInMemoryTaskRelay("memory"), originStore = createTaskStore({ path: ":memory:" }), targetStore = createTaskStore({ path: ":memory:" });
+	const relay = createInMemoryTaskRelay("memory"), originStore = createTaskStore(), targetStore = createTaskStore();
 	let now = 1000;
 	const clock = { now: () => now };
 	const a = createTaskCore({ endpoint: origin, relay, store: originStore, clock });
@@ -40,20 +37,19 @@ test("assignment, intent and canonical envelopes persist their creation time wit
 	} finally { originStore.close(); targetStore.close(); }
 });
 
-test("missing and invalid legacy transport metadata is rejected before any relay request", async () => {
-	let requests = 0;
-	const relay = createWolfpackTaskRelay({ sessionName: "private-test", baseUrl: "https://must-not-contact.invalid", fetch: forbiddenFetch(() => { requests++; }) });
-	const envelope: RelayEnvelope = { envelopeId: "old", protocolVersion: TASK_PROTOCOL_VERSION, source: origin, target, taskId: "task", kind: "assignment", payload: "{}" };
+test("missing or invalid immutable metadata is rejected by the codec before transport", () => {
+	const envelope: RelayEnvelope = { envelopeId: "bad", protocolVersion: TASK_PROTOCOL_VERSION, source: origin, target, taskId: "task", kind: "assignment", payload: "{}" };
 	for (const createdAt of [undefined, "invalid", "2026-09-08", "2026-09-08T00:00:00+00:00"]) {
-		await expect(relay.send({ ...envelope, createdAt })).rejects.toMatchObject({ code: INVALID_RELAY_METADATA, retryable: false });
+		let failure: unknown; try { toWolfpackEnvelope({ ...envelope, createdAt }); } catch (error) { failure = error; }
+		expect(failure).toMatchObject({ code: INVALID_RELAY_METADATA, retryable: false });
 	}
-	expect(requests).toBe(0);
 });
 
-test("legacy pending outbox is quarantined unchanged rather than stamped and blindly retried", async () => {
+test("malformed pending metadata is blocked within this lifetime rather than fabricated", async () => {
 	let requests = 0;
-	const relay = createWolfpackTaskRelay({ sessionName: "private-test", baseUrl: "https://must-not-contact.invalid", fetch: forbiddenFetch(() => { requests++; }) });
-	const store = createTaskStore({ path: ":memory:" });
+	const relay = createInMemoryTaskRelay("memory");
+	relay.send = async input => { toWolfpackEnvelope(input); requests++; throw new Error("unexpected send"); };
+	const store = createTaskStore();
 	const envelope: RelayEnvelope = { envelopeId: "legacy", protocolVersion: TASK_PROTOCOL_VERSION, source: origin, target, taskId: "task", kind: "assignment", payload: "{}" };
 	store.putOutbox(envelope);
 	const alreadyAccepted = { ...envelope, envelopeId: "already-accepted" };

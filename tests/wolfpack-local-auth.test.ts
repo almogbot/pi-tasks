@@ -20,7 +20,7 @@ test("local configured JWT uses current short-lived claims and is never sent to 
 });
 
 test("an HTTP 401 reports authentication failure without retiring or rebinding a healthy relay lifetime", async () => {
-  const store = createTaskStore({ path: ":memory:" });
+  const store = createTaskStore();
   const epoch = "00000000-0000-4000-8000-000000000001", endpoint = { relay: "wolfpack-pi-tasks-v2", id: "00000000-0000-4000-8000-000000000002" };
   const fetcher = Object.assign(async (_url: unknown, init?: RequestInit) => JSON.parse(String(init?.body)).operation === "connect"
     ? Response.json({ ok: true, profile: "volatile-v1", epoch, value: { kind: "connected", endpoint, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() } })
