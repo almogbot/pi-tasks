@@ -64,6 +64,12 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and expl
     await events.agent_settled!({}, context);
     expect(messages.length).toBeGreaterThan(0);
     expect(frames.some(frame => frame.operation === "acknowledge")).toBe(true);
+    const acknowledgements = frames.filter(frame => frame.operation === "acknowledge").length;
+    const message = await tools.agent_task_message.execute("self-intent", { taskId: result.details.taskId, type: "information", message: "exercise intent ACK through the owned core receiver" }, undefined);
+    expect(message.isError).not.toBe(true);
+    await events.agent_settled!({}, context);
+    expect(statuses.at(-1)).toBeUndefined();
+    expect(frames.filter(frame => frame.operation === "acknowledge").length).toBeGreaterThan(acknowledgements);
     await events.session_shutdown!({}, context);
     const calls = frames.length;
     await events.agent_end!({}, context); await events.agent_settled!({}, context);

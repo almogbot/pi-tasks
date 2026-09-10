@@ -42,7 +42,9 @@ export async function createConfiguredTaskCore(options: ConfiguredTaskCoreOption
       if (typeof value !== "function") continue;
       Object.defineProperty(owned, key, { enumerable: true, value: (...args: unknown[]) => {
         if (closed) throw new TaskProtocolError("RELAY_CLOSED", "task session is closed", { retryable: false });
-        const result: unknown = value(...args);
+        // Core methods may call sibling methods through `this` (notably intent ACK).
+        // Keep their original receiver while the outer promise owns the full operation.
+        const result: unknown = value.apply(core, args);
         if (!(result instanceof Promise)) return result;
         active.add(result);
         void result.then(() => active.delete(result), () => active.delete(result));
