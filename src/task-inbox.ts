@@ -5,6 +5,7 @@ import type { RelayDelivery, TaskEvent } from "./task-protocol";
 const TASK_EVENT_CUSTOM_TYPE = "pi-tasks-event";
 const TASK_WAKE_CUSTOM_TYPE = "pi-tasks-wake";
 const TASK_CURSOR_CUSTOM_TYPE = "pi-tasks-relay-cursor";
+const TASK_RECORD_CUSTOM_TYPE = "pi-tasks-event-record";
 
 interface InboxContext {
 	readonly isIdle: () => boolean;
@@ -17,7 +18,7 @@ interface InboxPi {
 		message: { readonly customType: string; readonly content: string; readonly display: boolean; readonly details: TaskEventDetails },
 		options: { readonly triggerTurn: false } | { readonly triggerTurn: true; readonly deliverAs: "followUp" },
 	): void;
-	appendEntry(customType: string, data: { readonly cursor: string }): void;
+	appendEntry(customType: string, data: { readonly cursor: string } | TaskEventDetails): void;
 }
 
 export interface TaskEventDetails {
@@ -46,6 +47,11 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 		if (context.hasPendingMessages()) return;
 		const eventDetails = { taskId: event.taskId, eventId: event.eventId };
 		const eventKey = key(event.taskId, event.eventId);
+		if (!isModelVisible(event.type) && !recordedEventKeys(context.sessionManager.getEntries()).has(eventKey)) {
+			// Archive receipts/parent ACK/late-terminal facts without waking the model.
+			// This is evidence only: no task state or delivery queue is reconstructed.
+			pi.appendEntry(TASK_RECORD_CUSTOM_TYPE, { ...eventDetails, event });
+		}
 		if (event.type === "task.created") {
 			await recordDeliveryEvidence(core, eventDetails, { stage: TaskDeliveryStage.receiverRecorded, state: TaskDeliveryEvidenceState.confirmed }, signal);
 		}
@@ -126,6 +132,12 @@ function taskMessageDetails(entries: readonly unknown[], customType: string): re
 		events.push({ taskId: entry.details.taskId, eventId: entry.details.eventId });
 	}
 	return events;
+}
+
+function recordedEventKeys(entries: readonly unknown[]): Set<string> {
+	return new Set(entries.flatMap(entry => isRecord(entry) && entry.type === "custom" && entry.customType === TASK_RECORD_CUSTOM_TYPE
+		&& isRecord(entry.data) && typeof entry.data.taskId === "string" && typeof entry.data.eventId === "string"
+		? [key(entry.data.taskId, entry.data.eventId)] : []));
 }
 
 function taskMessageKeys(entries: readonly unknown[], customType: string): Set<string> {

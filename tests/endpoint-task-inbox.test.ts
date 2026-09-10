@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 
 import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
@@ -10,7 +10,41 @@ import { deliverTaskInbox } from "../src/task-inbox";
 const origin = { relay: "memory", id: "origin" };
 const receiver = { relay: "memory", id: "receiver" };
 
-test("persists inbound state, inserts structural evidence, then records a logical receipt before relay acknowledgement", async () => {
+test("archives non-waking facts before ACK, deduplicates an ACK retry and retains parent acknowledgment in session history", async () => {
+	const relay = createInMemoryTaskRelay("memory"), parentStore = createTaskStore(), childStore = createTaskStore();
+	const parent = createTaskCore({ endpoint: origin, relay, store: parentStore, ids: ids("archive-parent") });
+	const child = createTaskCore({ endpoint: receiver, relay, store: childStore, ids: ids("archive-child") });
+	await parent.connect(); await child.connect();
+	const task = await parent.createTask({ target: receiver, task: "archive control facts", timeoutMs: 60_000 });
+	await child.receive(); await child.submitIntent({ taskId: task.taskId, type: "task.completed", payload: { summary: "done" } });
+	await parent.receive(); await parent.acknowledgeParent(task.taskId);
+	const entries: any[] = []; let archived = false, failed = false;
+	const pi = {
+		sendMessage(message: any) { entries.push({ type: "custom_message", ...message }); },
+		appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); if (customType === "pi-tasks-event-record") archived = true; },
+	};
+	const context = { isIdle: () => true, hasPendingMessages: () => false, sessionManager: { getEntries: () => entries } };
+	const acknowledge = child.acknowledgeRelayDelivery.bind(child);
+	const ack = spyOn(child, "acknowledgeRelayDelivery").mockImplementation(async cursor => {
+		if (archived && !failed) { failed = true; throw new Error("fixture ACK unavailable"); }
+		return acknowledge(cursor);
+	});
+	try {
+		await expect(deliverTaskInbox(pi, child, context)).rejects.toThrow("fixture ACK unavailable");
+		await deliverTaskInbox(pi, child, context);
+		await parent.receive(); await deliverTaskInbox(pi, child, context);
+		const records = entries.filter(entry => entry.customType === "pi-tasks-event-record");
+		expect(records.some(entry => entry.data.event.type === "task.parent_acknowledged")).toBe(true);
+		expect(records.some(entry => entry.data.event.type === "task.delivery_receipt")).toBe(true);
+		expect(new Set(records.map(entry => entry.data.eventId)).size).toBe(records.length);
+		expect(records.every(entry => entry.data.event.taskId === task.taskId)).toBe(true);
+		expect(entries.some(entry => entry.type === "custom_message" && entry.details?.event?.type === "task.parent_acknowledged")).toBe(false);
+		const restarted = createTaskCore({ endpoint: receiver, relay, store: createTaskStore(), ids: ids("fresh") });
+		expect(restarted.listTasks()).toEqual([]); // The archive does not recreate active state.
+	} finally { ack.mockRestore(); parentStore.close(); childStore.close(); }
+});
+
+test("records inbound RAM state and structural session evidence before relay acknowledgement", async () => {
 	const relay = createInMemoryTaskRelay("memory");
 	const parent = createTaskCore({ endpoint: origin, relay, store: createTaskStore(), ids: ids("parent") });
 	const child = createTaskCore({ endpoint: receiver, relay, store: createTaskStore(), ids: ids("child") });

@@ -26,7 +26,7 @@ The `agent_task_send` schema is exactly `to`, `task`, and optional `timeoutMs`. 
 
 ## history versus live state
 
-- Pi inserts task messages through its safe `deliverAs: "followUp"` queue. Pi session messages and tool calls/results preserve historical context. Received model-visible task events include the complete structured event in `pi-tasks-event` details, including results—not just a rendered summary.
+- Pi requests task-processing turns through its safe `deliverAs: "followUp"` queue. Pi session messages and tool calls/results preserve historical context. Non-waking receipts, parent ACKs and late-terminal facts are archived as `pi-tasks-event-record` custom entries before transport ACK, without waking the model. Received model-visible task events include the complete structured event in `pi-tasks-event` details, including results—not just a rendered summary.
 - Active tasks, outbox intentions, individual ACK checkpoints, deduplication and delivery-blocked evidence are RAM-owned. Each endpoint has lower-only limits of16,384 records/32MiB encoded state. Admission fails before exceeding those bounds; they are not a process-RSS guarantee.
 - `agent_task_send` confirms relay acceptance, **not execution**. `receiver_recorded` confirms receiver RAM receipt, **not durable persistence**. Pi insertion and wake acceptance are separate evidence, never proof of model execution.
 - Session history is not an operational journal. A new process/lifecycle starts empty with a fresh endpoint/generation; it does not reconstruct tasks, replay envelopes, reuse old ACKs or reopen a worker gate from old history.
