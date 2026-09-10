@@ -223,6 +223,7 @@ class Transport {
         if (controller.signal.aborted) throw abortError();
         const response = await this.fetcher(this.url, { method: "POST", headers: { "content-type": "application/json" }, body: encoded, redirect: "error", signal: controller.signal });
         if (controller.signal.aborted) { void response.body?.cancel().catch(() => undefined); throw abortError(); }
+        if (response.status === 401) { void response.body?.cancel().catch(() => undefined); throw failure("RELAY_AUTH_REQUIRED", false); }
         const reader = response.body?.getReader();
         if (!reader) throw failure("INVALID_RESPONSE", true);
         const cancel = () => { void reader.cancel().catch(() => undefined); };

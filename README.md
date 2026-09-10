@@ -6,7 +6,7 @@
 
 The default extension uses the memory-owned local Wolfpack relay, never the in-memory conformance fixture or a silent legacy fallback. It negotiates `volatile-v1` at `POST /api/task-relay/volatile-v1`, and keeps endpoint task state at `~/.pi/tasks/v2/sessions/<sha256(WOLFPACK_SESSION_NAME)>/tasks.sqlite`. No transport opt-in flag is needed.
 
-**Coordinated cutover branch, not a released installation:** this extension requires a compatible Wolfpack memory-owned server. Server default selection, discovery/readiness, verified federation, packaged release and installed rollout must be coordinated before publication as a normal release. An old/durable server is refused, not silently adopted.
+**Coordinated cutover branch, not a released installation:** this extension requires a compatible Wolfpack memory-owned server. The paired source server now defaults to memory-owned transport, with epoch-aware readiness and signed same-user federation. Packaged/native/installed and physical two-machine validation, independent review and release rollout still gate publication as a normal release. An old/durable server is refused, not silently adopted.
 
 Set `WOLFPACK_SESSION_NAME` for every Pi process. The adapter uses `WOLFPACK_PORT` when the local control port differs from `18790`; `WOLFPACK_SESSION_NAME` resolves the active Pi process to its relay endpoint. After the target extension registers, run `wolfpack session status <session> --json` and read its `taskEndpoint`. Pass that opaque `{ relay, id }` value unchanged; do not derive it from a session name, broker ID, terminal label, output, or prose.
 
@@ -104,6 +104,23 @@ physical-device or Pi/model execution proof.
 
 Those 0.1.9 corrections alone did not activate the memory-owned profile. This
 cutover branch now uses the session below in the normal extension lifecycle.
+
+## local authentication
+
+When the local control server requires JWT, the configured factory uses the owner's
+existing `WOLFPACK_JWT_SECRET` (minimum 32 characters), `WOLFPACK_JWT_ISSUER` and
+`WOLFPACK_JWT_AUDIENCE` environment configuration to mint a fresh 60-second token.
+It does not distribute or discover secrets. Automatic credentials are sent only to
+HTTP loopback, never copied to arbitrary programmatic HTTPS relay URLs. Such
+clients must provide their own authenticated fetch. HTTP 401 is reported as
+`RELAY_AUTH_REQUIRED`; it does not retire or silently rebind a healthy epoch.
+
+Remote CLI task endpoints must be locally resolved aliases. The paired Wolfpack
+CLI resolves a selected remote session through the local coordinator's live
+registration and host-verified peer route. A remote list exposes only explicitly
+remote metadata; select an exact session with `session status` before task send.
+A failed resolution removes `taskEndpoint`, reports `taskEndpointError`, and
+retains any successfully created remote session for exact-ID inspection.
 
 ## memory-owned transport lifecycle
 

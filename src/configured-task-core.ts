@@ -3,6 +3,7 @@ import { TaskProtocolError } from "./task-protocol";
 import { createTaskStore } from "./task-store";
 import { createVolatileTaskSession } from "./volatile-task-session";
 import { wolfpackTaskStorePath } from "./wolfpack-task-relay";
+import { wolfpackLocalHeaders } from "./wolfpack-local-auth";
 
 export interface OwnedTaskCore extends TaskCore {
   /** Fence new work, abort transport requests, settle active calls, then close SQLite. */
@@ -30,7 +31,9 @@ export async function createConfiguredTaskCore(options: ConfiguredTaskCoreOption
   const store = createTaskStore({ path: options.path ?? wolfpackTaskStorePath(sessionName) });
   let session: ReturnType<typeof createVolatileTaskSession> | undefined;
   try {
-    session = createVolatileTaskSession({ url, callerSession: sessionName, store, ...(options.fetch && { fetch: options.fetch }), ...(options.requestTimeoutMs !== undefined && { requestTimeoutMs: options.requestTimeoutMs }) });
+    const requestFetch = options.fetch ?? fetch;
+    const authenticated = Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => requestFetch(input, { ...init, headers: wolfpackLocalHeaders(url, init?.headers) }), { preconnect: requestFetch.preconnect }) as typeof fetch;
+    session = createVolatileTaskSession({ url, callerSession: sessionName, store, fetch: authenticated, ...(options.requestTimeoutMs !== undefined && { requestTimeoutMs: options.requestTimeoutMs }) });
     const core = await (options.rebind ? session.rebind(signal) : session.connect(signal));
     const active = new Set<Promise<unknown>>();
     let closed = false, closing: Promise<void> | undefined;

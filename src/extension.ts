@@ -469,6 +469,7 @@ function outboxFailureStatus(error: unknown): string {
 	if (error instanceof TaskProtocolError) {
 		if (["RELAY_RESET", "RELAY_REBIND_REQUIRED"].includes(error.code)) return "tasks: relay reset; /task-relay-rebind";
 		if (error.code === "RELAY_PROFILE_REQUIRED") return "tasks: compatible memory-owned relay required";
+		if (error.code === "RELAY_AUTH_REQUIRED") return "tasks: Wolfpack authentication required";
 	}
 	return error instanceof TaskOutboxDeliveryError && error.code === TARGET_NOT_REGISTERED_CODE ? "tasks: outbox degraded" : "tasks: relay unavailable";
 }
