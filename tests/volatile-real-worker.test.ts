@@ -9,6 +9,10 @@ import { createVolatileTaskSession } from "../src/volatile-task-session";
 const wolfpack = process.env.PI_TASKS_WOLFPACK_SOURCE;
 const revision = process.env.PI_TASKS_WOLFPACK_REVISION;
 
+// Bun's eager .rejects matcher can starve same-process HTTP/worker callbacks.
+// Settle through normal JS await, then assert the identical structured failure.
+const failure = (pending: Promise<unknown>): Promise<unknown> => pending.then(() => undefined, (error: unknown) => error);
+
 test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer confirmation loss, SQLite reopen and explicit epoch rebind", async () => {
   expect(isAbsolute(wolfpack!)).toBe(true);
   expect(revision).toMatch(/^[0-9a-f]{40}$/);
@@ -71,7 +75,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     expect(resolved.ok).toBe(true);
     if (!resolved.ok || resolved.value.kind !== "resolved") throw new Error("fixture topology failed");
     const target = resolved.value.endpoint;
-    await expect(ac.createTask({ target, task: "first", timeoutMs: 60_000 })).rejects.toMatchObject({ code: "PEER_UNREACHABLE", retryable: true });
+    expect(await failure(ac.createTask({ target, task: "first", timeoutMs: 60_000 }))).toMatchObject({ code: "PEER_UNREACHABLE", retryable: true });
     expect(aStore.outbox("pending")).toHaveLength(1); expect(aStore.outbox("accepted")).toEqual([]);
     aSession.close(); aStore.close();
     aStore = createTaskStore({ path: join(root, "a.sqlite") }); stores[0] = aStore;
@@ -85,7 +89,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     await ac.createTask({ target, task: "second", timeoutMs: 60_000 });
     await ac.createTask({ target, task: "third", timeoutMs: 60_000 });
     const first = await bc.receive(); expect(first.map(d => d.cursor)).toEqual(["1", "2", "3"]);
-    await expect(bc.acknowledgeRelayDelivery("2")).rejects.toMatchObject({ code: "RELAY_UNAVAILABLE" });
+    expect(await failure(bc.acknowledgeRelayDelivery("2"))).toMatchObject({ code: "RELAY_UNAVAILABLE" });
     expect(bStore.getReceiveCursor()).toBe("0");
     bSession.close(); bStore.close();
     bStore = createTaskStore({ path: join(root, "b.sqlite") }); stores[1] = bStore;
@@ -105,9 +109,9 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     const pending = await bc.receive(); expect(pending.map(d => d.cursor)).toEqual(["1"]);
     await bc.acknowledgeRelayDelivery("1"); expect(bStore.getReceiveCursor()).toBe("3");
     await b.restart();
-    await expect(bc.receive()).rejects.toMatchObject({ code: "RELAY_RESET", retryable: false });
+    expect(await failure(bc.receive())).toMatchObject({ code: "RELAY_RESET", retryable: false });
     expect(bStore.getRelayTransportBinding()?.reset).toBe(true);
-    await expect(ac.createTask({ target, task: "old peer lifetime", timeoutMs: 60_000 })).rejects.toMatchObject({ code: "DELIVERY_UNCONFIRMED", retryable: false, details: { mayHaveBeenDelivered: true } });
+    expect(await failure(ac.createTask({ target, task: "old peer lifetime", timeoutMs: 60_000 }))).toMatchObject({ code: "DELIVERY_UNCONFIRMED", retryable: false, details: { mayHaveBeenDelivered: true } });
     expect(aStore.quarantinedOutbox()).toHaveLength(1);
     const attempts = peerFrames.length; await ac.flushOutbox(); expect(peerFrames).toHaveLength(attempts);
     expect(aSession.status().state).toBe("ready"); // Peer failure does not rotate this source.
