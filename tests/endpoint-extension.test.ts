@@ -17,6 +17,33 @@ interface Tool {
 	execute(id: string, parameters: Record<string, unknown>, signal: AbortSignal, update: undefined, context: unknown): Promise<{ readonly content: readonly { readonly text: string }[]; readonly details: unknown; readonly terminate?: boolean }>;
 }
 
+test.each([
+	["agent_task_status", {}],
+	["agent_task_wait", { timeoutMs: 1_000 }],
+	["agent_task_message", { type: "information", message: "historical" }],
+	["agent_task_cancel", {}],
+	["agent_task_ack", {}],
+	["agent_task_done", { status: "completed", summary: "historical" }],
+] as const)("unknown task tools return non-retryable UNKNOWN_TASK after RAM loss: %s", async (name, params) => {
+	const relay = createInMemoryTaskRelay("memory");
+	const store = createTaskStore();
+	const core = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store, ids: sequence("parent") });
+	await core.connect();
+	await relay.connect({ endpoint: { relay: "memory", id: "child" }, protocolVersion: "pi-tasks/v2", receiveCursor: "0" });
+	const { taskId } = await core.createTask({ target: { relay: "memory", id: "child" }, task: "historical assignment", timeoutMs: 1_000 });
+	const history = [{ type: "custom_message", customType: "pi-tasks-event", details: { event: core.getTask(taskId)!.events[0] } }];
+	store.clear();
+	const tools: Record<string, Tool> = {};
+	registerAgentTaskTools({ on: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI, core);
+
+	const result = await tools[name]!.execute("call", { taskId, ...params }, new AbortController().signal, undefined, { sessionManager: { getEntries: () => history } });
+
+	expect(result.details).toMatchObject({ error: { code: "UNKNOWN_TASK", retryable: false } });
+	expect(core.getTask(taskId)).toBeUndefined();
+	expect(core.listTasks()).toEqual([]);
+	store.close();
+});
+
 test("registers endpoint-owned tools with only relay-qualified opaque targets", async () => {
 	const relay = createInMemoryTaskRelay("memory");
 	const core = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });

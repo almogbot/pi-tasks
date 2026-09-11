@@ -483,7 +483,7 @@ function throwIfTerminalDeliveryBlocked(store: TaskStore, taskId: string): void 
 
 function requiredTask(store: TaskStore, taskId: string): TaskSnapshot {
 	const task = store.getTask(taskId);
-	if (!task) throw new TaskProtocolError("UNKNOWN_TASK", `unknown task: ${taskId}`);
+	if (!task) throw new TaskProtocolError("UNKNOWN_TASK", `unknown task: ${taskId}`, { retryable: false });
 	return task;
 }
 

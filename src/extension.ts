@@ -273,7 +273,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 			try {
 				const activeCore = await configuredCore(signal);
 				const task = activeCore.getTask(params.taskId);
-				if (!task) return taskError(new Error("unknown local task"));
+				if (!task) return taskError(new TaskProtocolError("UNKNOWN_TASK", `unknown task: ${params.taskId}`, { retryable: false }));
 				const deliveryEvidence = taskDeliveryEvidence(task);
 				return toolResult({ ...task, deliveryEvidence }, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}${receiverAssignment(activeCore, task, context)}${deliveryEvidenceText(deliveryEvidence)}`);
 			} catch (error) { return taskError(error); }
@@ -287,7 +287,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 				for (;;) {
 					await refreshInbox(signal);
 					const task = (await configuredCore(signal)).getTask(params.taskId);
-					if (!task) return taskError(new Error("unknown local task"));
+					if (!task) return taskError(new TaskProtocolError("UNKNOWN_TASK", `unknown task: ${params.taskId}`, { retryable: false }));
 					if (terminal(task.status)) return toolResult(task, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}`);
 					if (Date.now() >= deadline) return toolResult({ taskId: params.taskId, status: task.status }, `## task wait\n- task: \`${params.taskId}\`\n- status: ${task.status}\n- wait timed out`);
 					onUpdate?.({ content: [{ type: "text", text: `waiting for ${params.taskId}...` }], details: {} });
@@ -347,7 +347,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 					return blockedDoneResult(activeCore, params.taskId, params.status, error) ?? taskError(error);
 				}
 				const task = activeCore.getTask(params.taskId);
-				if (!task) return taskError(new Error("unknown local task"));
+				if (!task) return taskError(new TaskProtocolError("UNKNOWN_TASK", `unknown task: ${params.taskId}`, { retryable: false }));
 				if (submission?.authority === "origin" && submission.canonicalEvent.type === "task.late_terminal") {
 					return {
 						...toolResult({ taskId: params.taskId, requestedStatus: params.status, observedCanonicalStatus: task.status, canonicalEvent: submission.canonicalEvent }, `## canonical late terminal recorded\n- task: \`${params.taskId}\`\n- requested status: ${params.status}\n- canonical status remains: ${task.status}\n- ${params.summary}`),
